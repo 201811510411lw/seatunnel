@@ -70,15 +70,7 @@ public class PaimonAggregatedCommitter
                     () -> {
                         log.debug("Trying to commit states streaming mode");
                         Map<Long, List<CommitMessage>> committablesMap =
-                                aggregatedCommitInfo.stream()
-                                        .flatMap(
-                                                paimonAggregatedCommitInfo ->
-                                                        paimonAggregatedCommitInfo
-                                                                .getCommittablesMap().entrySet()
-                                                                .stream())
-                                        .collect(
-                                                Collectors.toMap(
-                                                        Map.Entry::getKey, Map.Entry::getValue));
+                                mergeCommittables(aggregatedCommitInfo);
                         if (!committablesMap.isEmpty()) {
                             tableCommit.filterAndCommit(committablesMap);
                         }
@@ -117,15 +109,7 @@ public class PaimonAggregatedCommitter
                     () -> {
                         log.debug("Trying to commit states streaming mode");
                         Map<Long, List<CommitMessage>> committablesMap =
-                                aggregatedCommitInfo.stream()
-                                        .flatMap(
-                                                paimonAggregatedCommitInfo ->
-                                                        paimonAggregatedCommitInfo
-                                                                .getCommittablesMap().entrySet()
-                                                                .stream())
-                                        .collect(
-                                                Collectors.toMap(
-                                                        Map.Entry::getKey, Map.Entry::getValue));
+                                mergeCommittables(aggregatedCommitInfo);
                         if (!committablesMap.isEmpty()) {
                             committablesMap.values().forEach(tableCommit::abort);
                         }
@@ -135,6 +119,23 @@ public class PaimonAggregatedCommitter
             throw new PaimonConnectorException(
                     PaimonConnectorErrorCode.TABLE_WRITE_COMMIT_FAILED, e);
         }
+    }
+
+    private Map<Long, List<CommitMessage>> mergeCommittables(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) {
+        Map<Long, List<CommitMessage>> committablesMap = new HashMap<>();
+        aggregatedCommitInfo.forEach(
+                info ->
+                        info.getCommittablesMap()
+                                .forEach(
+                                        (checkpointId, committables) ->
+                                                committablesMap
+                                                        .computeIfAbsent(
+                                                                checkpointId,
+                                                                id ->
+                                                                        new CopyOnWriteArrayList<>())
+                                                        .addAll(committables)));
+        return committablesMap;
     }
 
     @Override

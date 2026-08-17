@@ -71,6 +71,10 @@ public class FlinkSinkWriter<InputT, CommT, WriterStateT>
 
     private MultiTableResourceManager resourceManager;
 
+    // Flink may process records between prepareSnapshotPreBarrier and snapshotState. Keep the
+    // SeaTunnel writer's transaction boundary together so those records belong to the next commit.
+    private List<FlinkWriterState<WriterStateT>> pendingStates;
+
     FlinkSinkWriter(
             org.apache.seatunnel.api.sink.SinkWriter<SeaTunnelRow, CommT, WriterStateT> sinkWriter,
             long checkpointId,
@@ -162,6 +166,11 @@ public class FlinkSinkWriter<InputT, CommT, WriterStateT>
     @Override
     public List<CommitWrapper<CommT>> prepareCommit(boolean flush) throws IOException {
         Optional<CommT> commTOptional = sinkWriter.prepareCommit(checkpointId);
+        pendingStates =
+                sinkWriter.snapshotState(this.checkpointId).stream()
+                        .map(state -> new FlinkWriterState<>(this.checkpointId, state))
+                        .collect(Collectors.toList());
+        this.checkpointId++;
         return commTOptional
                 .map(CommitWrapper::new)
                 .map(Collections::singletonList)
@@ -170,6 +179,11 @@ public class FlinkSinkWriter<InputT, CommT, WriterStateT>
 
     @Override
     public List<FlinkWriterState<WriterStateT>> snapshotState() throws IOException {
+        if (pendingStates != null) {
+            List<FlinkWriterState<WriterStateT>> states = pendingStates;
+            pendingStates = null;
+            return states;
+        }
         List<FlinkWriterState<WriterStateT>> states =
                 sinkWriter.snapshotState(this.checkpointId).stream()
                         .map(state -> new FlinkWriterState<>(this.checkpointId, state))
