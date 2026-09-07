@@ -135,6 +135,60 @@ class IncrementalSourceEnumeratorCdcProgressTest {
         assertFalse(afterCleanup.contains("\"splitSummary\""));
     }
 
+    @Test
+    void restoresCheckpointConfirmedPhaseAcrossParallelismChanges() {
+        assertRestoredPhase(false, 2, CdcProgressPhase.SNAPSHOT_WAITING_CHECKPOINT);
+        assertRestoredPhase(true, 4, CdcProgressPhase.INCREMENTAL);
+    }
+
+    private static void assertRestoredPhase(
+            boolean assignerCompleted,
+            int restoredParallelism,
+            CdcProgressPhase expectedPhase) {
+        TableId table = TableId.parse("sales.orders");
+        SnapshotSplit assignedSplit = split("sales.orders.0", table);
+        Map<String, SnapshotSplit> assignedSplits =
+                Collections.singletonMap(assignedSplit.splitId(), assignedSplit);
+        Map<String, SnapshotSplitWatermark> completedOffsets =
+                Collections.singletonMap(
+                        assignedSplit.splitId(), new SnapshotSplitWatermark(null, null, null));
+        SnapshotPhaseState snapshotPhaseState =
+                new SnapshotPhaseState(
+                        Collections.singletonList(table),
+                        Collections.emptyList(),
+                        assignedSplits,
+                        completedOffsets,
+                        assignerCompleted,
+                        Collections.emptyList(),
+                        false,
+                        false);
+        SplitAssigner.Context assignerContext =
+                new SplitAssigner.Context<>(
+                        null, Collections.singleton(table), assignedSplits, completedOffsets);
+        HybridSplitAssigner splitAssigner =
+                new HybridSplitAssigner<>(
+                        assignerContext,
+                        restoredParallelism,
+                        1,
+                        new HybridPendingSplitsState(snapshotPhaseState, null),
+                        null,
+                        null);
+
+        @SuppressWarnings("unchecked")
+        SourceSplitEnumerator.Context<SourceSplitBase> runtimeContext =
+                Mockito.mock(SourceSplitEnumerator.Context.class);
+        Mockito.when(runtimeContext.registeredReaders()).thenReturn(Collections.singleton(0));
+        IncrementalSourceEnumerator enumerator =
+                new IncrementalSourceEnumerator(runtimeContext, splitAssigner);
+
+        enumerator.registerReader(0);
+
+        ArgumentCaptor<SourceEvent> event = ArgumentCaptor.forClass(SourceEvent.class);
+        Mockito.verify(runtimeContext)
+                .sendEventToSourceReader(Mockito.eq(0), event.capture());
+        assertEquals(expectedPhase, ((CdcProgressEvent) event.getValue()).getPhase());
+    }
+
     private static SnapshotSplit split(String id, TableId tableId) {
         return new SnapshotSplit(id, tableId, null, null, null);
     }
