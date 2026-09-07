@@ -23,7 +23,9 @@ import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.splitter.ChunkSplitter;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.SnapshotPhaseState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcSnapshotProgress;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
@@ -268,6 +270,23 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
     @Override
     public CdcProgressPhase getCdcProgressPhase() {
         return cdcProgressPhaseTracker.phase(allSplitsCompleted());
+    }
+
+    @Override
+    public CdcProgressEvent getCdcProgress() {
+        List<TableId> processedTables;
+        synchronized (alreadyProcessedTables) {
+            processedTables = new ArrayList<>(alreadyProcessedTables);
+        }
+        return new CdcProgressEvent(
+                getCdcProgressPhase(),
+                CdcSnapshotProgress.from(
+                        context.getCapturedTables(),
+                        new ArrayList<>(remainingTables),
+                        processedTables,
+                        new ArrayList<>(remainingSplits),
+                        new HashMap<>(assignedSplits),
+                        new HashMap<>(splitCompletedOffsets)));
     }
 
     /** Indicates there is no more splits available in this assigner. */

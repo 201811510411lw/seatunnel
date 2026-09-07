@@ -22,9 +22,15 @@ import org.apache.seatunnel.api.source.SourceEvent;
 public class CdcProgressEvent implements SourceEvent {
     private static final long serialVersionUID = 1L;
     private final CdcProgressPhase phase;
+    private final CdcSnapshotProgress snapshotProgress;
 
     public CdcProgressEvent(CdcProgressPhase phase) {
+        this(phase, null);
+    }
+
+    public CdcProgressEvent(CdcProgressPhase phase, CdcSnapshotProgress snapshotProgress) {
         this.phase = phase;
+        this.snapshotProgress = snapshotProgress;
     }
 
     public CdcProgressPhase getPhase() {
@@ -32,6 +38,11 @@ public class CdcProgressEvent implements SourceEvent {
     }
 
     public String toJson() {
-        return "{\"version\":1,\"phase\":\"" + phase.name() + "\"}";
+        StringBuilder json =
+                new StringBuilder("{\"version\":1,\"phase\":\"").append(phase.name()).append('\"');
+        if (snapshotProgress != null) {
+            snapshotProgress.appendJson(json);
+        }
+        return json.append('}').toString();
     }
 }

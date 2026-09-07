@@ -20,7 +20,6 @@ package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 import org.apache.seatunnel.api.source.SourceEvent;
 import org.apache.seatunnel.api.source.SourceSplitEnumerator;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingSplitsState;
-import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsAckEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
@@ -135,6 +134,7 @@ public class IncrementalSourceEnumerator
                 ((HybridSplitAssigner) splitAssigner).completedSnapshotPhase(event.getTableIds());
                 LOG.info(
                         "Clean the SnapshotSplitAssigner#assignedSplits/splitCompletedOffsets to empty.");
+                publishCdcProgress();
             }
         }
     }
@@ -181,6 +181,7 @@ public class IncrementalSourceEnumerator
             if (split.isPresent()) {
                 final SourceSplitBase sourceSplit = split.get();
                 context.assignSplit(nextAwaiting, sourceSplit);
+                publishCdcProgress();
                 awaitingReader.remove();
                 LOG.debug("Assign split {} to subtask {}", sourceSplit, nextAwaiting);
             } else {
@@ -200,8 +201,7 @@ public class IncrementalSourceEnumerator
 
     private void publishCdcProgress() {
         if (context.registeredReaders().contains(0)) {
-            context.sendEventToSourceReader(
-                    0, new CdcProgressEvent(splitAssigner.getCdcProgressPhase()));
+            context.sendEventToSourceReader(0, splitAssigner.getCdcProgress());
         }
     }
 }

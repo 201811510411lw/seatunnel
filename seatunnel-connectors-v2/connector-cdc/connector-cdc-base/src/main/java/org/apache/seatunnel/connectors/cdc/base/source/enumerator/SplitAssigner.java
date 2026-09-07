@@ -20,6 +20,7 @@ package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 import org.apache.seatunnel.api.state.CheckpointListener;
 import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingSplitsState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
@@ -42,6 +43,10 @@ public interface SplitAssigner {
 
     default CdcProgressPhase getCdcProgressPhase() {
         return CdcProgressPhase.INCREMENTAL;
+    }
+
+    default CdcProgressEvent getCdcProgress() {
+        return new CdcProgressEvent(getCdcProgressPhase());
     }
 
     /**

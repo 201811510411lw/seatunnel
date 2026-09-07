@@ -41,8 +41,8 @@ class IncrementalSourceEnumeratorCdcProgressTest {
                 Mockito.mock(SourceSplitEnumerator.Context.class);
         SplitAssigner splitAssigner = Mockito.mock(SplitAssigner.class);
         Mockito.when(context.registeredReaders()).thenReturn(new HashSet<>(Arrays.asList(0, 1)));
-        Mockito.when(splitAssigner.getCdcProgressPhase())
-                .thenReturn(CdcProgressPhase.SNAPSHOT_WAITING_CHECKPOINT);
+        Mockito.when(splitAssigner.getCdcProgress())
+                .thenReturn(new CdcProgressEvent(CdcProgressPhase.SNAPSHOT_WAITING_CHECKPOINT));
         IncrementalSourceEnumerator enumerator =
                 new IncrementalSourceEnumerator(context, splitAssigner);
 
@@ -50,7 +50,8 @@ class IncrementalSourceEnumeratorCdcProgressTest {
         enumerator.registerReader(0);
 
         ArgumentCaptor<SourceEvent> event = ArgumentCaptor.forClass(SourceEvent.class);
-        Mockito.verify(context, Mockito.times(2)).sendEventToSourceReader(Mockito.eq(0), event.capture());
+        Mockito.verify(context, Mockito.times(2))
+                .sendEventToSourceReader(Mockito.eq(0), event.capture());
         Mockito.verify(context, Mockito.never())
                 .sendEventToSourceReader(Mockito.eq(1), Mockito.any(SourceEvent.class));
         for (SourceEvent value : event.getAllValues()) {
