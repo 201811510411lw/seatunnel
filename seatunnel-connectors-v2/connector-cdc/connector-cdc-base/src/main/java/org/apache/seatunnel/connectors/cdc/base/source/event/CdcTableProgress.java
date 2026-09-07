@@ -18,6 +18,7 @@
 package org.apache.seatunnel.connectors.cdc.base.source.event;
 
 import java.io.Serializable;
+import java.util.List;
 
 public class CdcTableProgress implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -28,6 +29,8 @@ public class CdcTableProgress implements Serializable {
     private final Integer completedSplits;
     private final Integer processingSplits;
     private final Integer queuedSplits;
+    private final Integer unknownSplits;
+    private final List<CdcSplitProgress> splits;
 
     CdcTableProgress(
             String table,
@@ -35,13 +38,17 @@ public class CdcTableProgress implements Serializable {
             Integer totalSplits,
             Integer completedSplits,
             Integer processingSplits,
-            Integer queuedSplits) {
+            Integer queuedSplits,
+            Integer unknownSplits,
+            List<CdcSplitProgress> splits) {
         this.table = table;
         this.status = status;
         this.totalSplits = totalSplits;
         this.completedSplits = completedSplits;
         this.processingSplits = processingSplits;
         this.queuedSplits = queuedSplits;
+        this.unknownSplits = unknownSplits;
+        this.splits = splits;
     }
 
     public String getTable() {
@@ -66,5 +73,20 @@ public class CdcTableProgress implements Serializable {
 
     public Integer getQueuedSplits() {
         return queuedSplits;
+    }
+
+    public Integer getUnknownSplits() {
+        return unknownSplits;
+    }
+
+    public List<CdcSplitProgress> getSplits() {
+        return splits;
+    }
+
+    CdcSplitProgress split(String splitId) {
+        return splits.stream()
+                .filter(split -> split.getId().equals(splitId))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Unknown split " + splitId));
     }
 }

@@ -25,8 +25,6 @@ import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceRecords;
-import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
-import org.apache.seatunnel.connectors.cdc.base.source.split.state.SourceSplitStateBase;
 import org.apache.seatunnel.connectors.cdc.debezium.DebeziumDeserializationSchema;
 import org.apache.seatunnel.connectors.seatunnel.common.source.reader.RecordEmitter;
 import org.apache.seatunnel.connectors.seatunnel.common.source.reader.RecordsWithSplitIds;

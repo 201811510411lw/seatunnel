@@ -77,6 +77,20 @@ class CdcSnapshotProgressTest {
         assertNull(progress.table("sales.unplanned").getTotalSplits());
         assertEquals(2, progress.table("sales.processing").getTotalSplits());
         assertEquals(1, progress.table("sales.processing").getCompletedSplits());
+        assertEquals(4, progress.getTotalSplits());
+        assertTrue(progress.isSplitProgressAvailable());
+        assertEquals(2, progress.getCompletedSplits());
+        assertEquals(1, progress.getAssignedSplits());
+        assertEquals(1, progress.getWaitingSplits());
+        assertEquals(
+                CdcSplitProgressStatus.COMPLETED,
+                progress.table("sales.processing").split("processing-0").getStatus());
+        assertEquals(
+                CdcSplitProgressStatus.ASSIGNED,
+                progress.table("sales.processing").split("processing-1").getStatus());
+        assertEquals(
+                CdcSplitProgressStatus.QUEUED,
+                progress.table("sales.queued").split("queued-0").getStatus());
     }
 
     @Test
@@ -101,6 +115,101 @@ class CdcSnapshotProgressTest {
         assertTrue(progress.isTablesTruncated());
         assertTrue(json.contains("\"tablesTruncated\":true"));
         assertTrue(json.contains("\"totalTables\":201"));
+    }
+
+    @Test
+    void boundsSplitDetailsWithoutChangingSummaryTotals() {
+        TableId table = TableId.parse("sales.large_table");
+        ArrayList<SnapshotSplit> splits = new ArrayList<>();
+        for (int index = 0; index < 501; index++) {
+            splits.add(split("large-" + index, table));
+        }
+
+        CdcSnapshotProgress progress =
+                CdcSnapshotProgress.from(
+                        Collections.singletonList(table),
+                        Collections.emptyList(),
+                        Collections.singletonList(table),
+                        splits,
+                        Collections.emptyMap(),
+                        Collections.emptyMap());
+        String json = new CdcProgressEvent(CdcProgressPhase.SNAPSHOT, progress).toJson();
+
+        assertEquals(501, progress.getTotalSplits());
+        assertEquals(501, progress.getWaitingSplits());
+        assertEquals(500, progress.table("sales.large_table").getSplits().size());
+        assertTrue(progress.isSplitsTruncated());
+        assertTrue(json.contains("\"splitsTruncated\":true"));
+        assertFalse(json.contains("splitKey"));
+        assertFalse(json.contains("splitStart"));
+        assertFalse(json.contains("splitEnd"));
+    }
+
+    @Test
+    void marksContradictorySplitStateUnknownWithoutDoubleCounting() {
+        TableId table = TableId.parse("sales.conflicting");
+        SnapshotSplit split = split("conflicting-0", table);
+
+        CdcSnapshotProgress progress =
+                CdcSnapshotProgress.from(
+                        Collections.singletonList(table),
+                        Collections.emptyList(),
+                        Collections.singletonList(table),
+                        Collections.singletonList(split),
+                        Collections.singletonMap(split.splitId(), split),
+                        Collections.emptyMap());
+
+        assertEquals(1, progress.getTotalSplits());
+        assertEquals(1, progress.getUnknownSplits());
+        assertEquals(
+                CdcSplitProgressStatus.UNKNOWN,
+                progress.table("sales.conflicting").split("conflicting-0").getStatus());
+    }
+
+    @Test
+    void omitsSplitSummaryWhenCompletedTableSplitFactsWereCleared() {
+        TableId completed = TableId.parse("sales.completed");
+
+        CdcSnapshotProgress progress =
+                CdcSnapshotProgress.from(
+                        Collections.singletonList(completed),
+                        Collections.emptyList(),
+                        Collections.singletonList(completed),
+                        Collections.emptyList(),
+                        Collections.emptyMap(),
+                        Collections.emptyMap());
+        String json = new CdcProgressEvent(CdcProgressPhase.INCREMENTAL, progress).toJson();
+
+        assertFalse(progress.isSplitProgressAvailable());
+        assertTrue(json.contains("\"splitProgressAvailable\":false"));
+        assertFalse(json.contains("\"splitSummary\""));
+        assertTrue(json.contains("\"splitsTruncated\":false"));
+    }
+
+    @Test
+    void reportsTruncatedReliableDetailsWhenGlobalSplitSummaryIsUnavailable() {
+        TableId cleared = TableId.parse("sales.cleared");
+        TableId visible = TableId.parse("sales.visible");
+        ArrayList<SnapshotSplit> visibleSplits = new ArrayList<>();
+        for (int index = 0; index < 501; index++) {
+            visibleSplits.add(split("visible-" + index, visible));
+        }
+
+        CdcSnapshotProgress progress =
+                CdcSnapshotProgress.from(
+                        Arrays.asList(cleared, visible),
+                        Collections.emptyList(),
+                        Arrays.asList(cleared, visible),
+                        visibleSplits,
+                        Collections.emptyMap(),
+                        Collections.emptyMap());
+        String json = new CdcProgressEvent(CdcProgressPhase.INCREMENTAL, progress).toJson();
+
+        assertFalse(progress.isSplitProgressAvailable());
+        assertTrue(progress.isSplitsTruncated());
+        assertEquals(500, progress.table("sales.visible").getSplits().size());
+        assertFalse(json.contains("\"splitSummary\""));
+        assertTrue(json.contains("\"splitsTruncated\":true"));
     }
 
     @Test
