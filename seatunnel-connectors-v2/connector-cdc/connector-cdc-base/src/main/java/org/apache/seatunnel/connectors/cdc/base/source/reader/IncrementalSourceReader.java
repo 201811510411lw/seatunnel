@@ -18,10 +18,12 @@
 package org.apache.seatunnel.connectors.cdc.base.source.reader;
 
 import org.apache.seatunnel.api.source.Collector;
+import org.apache.seatunnel.api.source.SourceEvent;
 import org.apache.seatunnel.api.source.SourceReader;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
@@ -76,6 +78,7 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
     private transient volatile Offset snapshotChangeLogOffset;
 
     private final AtomicBoolean needSendSplitRequest = new AtomicBoolean(false);
+    private volatile String cdcProgressJson = "{\"version\":1,\"phase\":\"SNAPSHOT\"}";
 
     public IncrementalSourceReader(
             DataSourceDialect<C> dataSourceDialect,
@@ -97,6 +100,16 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
         this.finishedUnackedSplits = new HashMap<>();
         this.subtaskId = context.getIndexOfSubtask();
         this.debeziumDeserializationSchema = debeziumDeserializationSchema;
+        if (subtaskId == 0) {
+            context.getMetricsContext().gauge("chronoforgeCdcProgress", () -> cdcProgressJson);
+        }
+    }
+
+    @Override
+    public void handleSourceEvent(SourceEvent sourceEvent) {
+        if (sourceEvent instanceof CdcProgressEvent) {
+            cdcProgressJson = ((CdcProgressEvent) sourceEvent).toJson();
+        }
     }
 
     @Override

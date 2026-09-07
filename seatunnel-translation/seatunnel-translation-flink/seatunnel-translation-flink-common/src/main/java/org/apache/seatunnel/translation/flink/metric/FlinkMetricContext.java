@@ -18,6 +18,7 @@
 package org.apache.seatunnel.translation.flink.metric;
 
 import org.apache.seatunnel.api.common.metrics.Counter;
+import org.apache.seatunnel.api.common.metrics.Gauge;
 import org.apache.seatunnel.api.common.metrics.Meter;
 import org.apache.seatunnel.api.common.metrics.Metric;
 import org.apache.seatunnel.api.common.metrics.MetricsContext;
@@ -72,6 +73,12 @@ public class FlinkMetricContext implements MetricsContext {
     public <M extends Meter> M meter(String name, M meter) {
         this.addMetric(name, meter);
         return meter;
+    }
+
+    @Override
+    public <T> Gauge<T> gauge(String name, Gauge<T> gauge) {
+        runtimeContext.getMetricGroup().gauge(name, gauge::getValue);
+        return gauge;
     }
 
     protected void addMetric(String name, Metric metric) {

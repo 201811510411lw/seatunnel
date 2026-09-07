@@ -19,6 +19,11 @@ package org.apache.seatunnel.api.common.metrics;
 
 public interface MetricsContext {
 
+    /** Registers a gauge whose current value is evaluated when the engine reports metrics. */
+    default <T> Gauge<T> gauge(String name, Gauge<T> gauge) {
+        return gauge;
+    }
+
     /**
      * registers a {@link ThreadSafeCounter} with SeaTunnel.
      *

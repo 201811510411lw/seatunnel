@@ -23,6 +23,7 @@ import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.splitter.ChunkSplitter;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.SnapshotPhaseState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
@@ -69,6 +70,7 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
     private boolean isTableIdCaseSensitive;
 
     private Long checkpointIdToFinish;
+    private final CdcProgressPhaseTracker cdcProgressPhaseTracker;
     private final DataSourceDialect<C> dialect;
 
     SnapshotSplitAssigner(
@@ -130,6 +132,7 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
         this.assignedSplits = new ConcurrentHashMap<>(assignedSplits);
         this.splitCompletedOffsets = new ConcurrentHashMap<>(splitCompletedOffsets);
         this.assignerCompleted = assignerCompleted;
+        this.cdcProgressPhaseTracker = new CdcProgressPhaseTracker(assignerCompleted);
         this.remainingTables = new ConcurrentLinkedDeque<>(remainingTables);
         this.isRemainingTablesCheckpointed = isRemainingTablesCheckpointed;
         this.isTableIdCaseSensitive = isTableIdCaseSensitive;
@@ -244,9 +247,10 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
                         true);
         // we need a complete checkpoint before mark this assigner to be completed, to wait for all
         // records of snapshot splits are completely processed
-        if (checkpointIdToFinish == null && !assignerCompleted && allSplitsCompleted()) {
+        if (checkpointIdToFinish == null && allSplitsCompleted()) {
             checkpointIdToFinish = checkpointId;
         }
+        cdcProgressPhaseTracker.snapshotState(checkpointId, allSplitsCompleted());
         return state;
     }
 
@@ -258,6 +262,12 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
             assignerCompleted = checkpointId >= checkpointIdToFinish;
             LOG.info("Snapshot split assigner is turn into completed status.");
         }
+        cdcProgressPhaseTracker.notifyCheckpointComplete(checkpointId, allSplitsCompleted());
+    }
+
+    @Override
+    public CdcProgressPhase getCdcProgressPhase() {
+        return cdcProgressPhaseTracker.phase(allSplitsCompleted());
     }
 
     /** Indicates there is no more splits available in this assigner. */

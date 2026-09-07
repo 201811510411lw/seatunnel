@@ -20,6 +20,7 @@ package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 import org.apache.seatunnel.api.source.SourceEvent;
 import org.apache.seatunnel.api.source.SourceSplitEnumerator;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingSplitsState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsAckEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
@@ -62,6 +63,7 @@ public class IncrementalSourceEnumerator
     @Override
     public void open() {
         splitAssigner.open();
+        publishCdcProgress();
     }
 
     @Override
@@ -87,6 +89,7 @@ public class IncrementalSourceEnumerator
     public void addSplitsBack(List<SourceSplitBase> splits, int subtaskId) {
         LOG.debug("Incremental Source Enumerator adds splits back: {}", splits);
         splitAssigner.addSplits(splits);
+        publishCdcProgress();
     }
 
     @Override
@@ -96,7 +99,7 @@ public class IncrementalSourceEnumerator
 
     @Override
     public void registerReader(int subtaskId) {
-        // do nothing
+        publishCdcProgress();
     }
 
     @Override
@@ -121,6 +124,7 @@ public class IncrementalSourceEnumerator
                                     .map(SnapshotSplitWatermark::getSplitId)
                                     .collect(Collectors.toList()));
             context.sendEventToSourceReader(subtaskId, ackEvent);
+            publishCdcProgress();
         } else if (sourceEvent instanceof CompletedSnapshotPhaseEvent) {
             LOG.debug(
                     "The enumerator receives completed snapshot phase event {} from subtask {}.",
@@ -137,12 +141,15 @@ public class IncrementalSourceEnumerator
 
     @Override
     public PendingSplitsState snapshotState(long checkpointId) {
-        return splitAssigner.snapshotState(checkpointId);
+        PendingSplitsState state = splitAssigner.snapshotState(checkpointId);
+        publishCdcProgress();
+        return state;
     }
 
     @Override
     public synchronized void notifyCheckpointComplete(long checkpointId) {
         splitAssigner.notifyCheckpointComplete(checkpointId);
+        publishCdcProgress();
         // incremental split may be available after checkpoint complete
         assignSplits();
     }
@@ -188,6 +195,13 @@ public class IncrementalSourceEnumerator
                     awaitingReader.remove();
                 }
             }
+        }
+    }
+
+    private void publishCdcProgress() {
+        if (context.registeredReaders().contains(0)) {
+            context.sendEventToSourceReader(
+                    0, new CdcProgressEvent(splitAssigner.getCdcProgressPhase()));
         }
     }
 }

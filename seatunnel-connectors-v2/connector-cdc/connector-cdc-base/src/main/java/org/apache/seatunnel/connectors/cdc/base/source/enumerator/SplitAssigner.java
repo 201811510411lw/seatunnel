@@ -20,6 +20,7 @@ package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 import org.apache.seatunnel.api.state.CheckpointListener;
 import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingSplitsState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
@@ -38,6 +39,10 @@ import java.util.Set;
  * determines split processing order.
  */
 public interface SplitAssigner {
+
+    default CdcProgressPhase getCdcProgressPhase() {
+        return CdcProgressPhase.INCREMENTAL;
+    }
 
     /**
      * Called to open the assigner to acquire any resources, like threads or network connections.

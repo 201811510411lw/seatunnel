@@ -23,6 +23,7 @@ import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.HybridPendingSplitsState;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingSplitsState;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.offset.OffsetFactory;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
@@ -41,6 +42,11 @@ import java.util.function.Predicate;
 
 /** Assigner for Hybrid split which contains snapshot splits and incremental splits. */
 public class HybridSplitAssigner<C extends SourceConfig> implements SplitAssigner {
+
+    @Override
+    public CdcProgressPhase getCdcProgressPhase() {
+        return snapshotSplitAssigner.getCdcProgressPhase();
+    }
 
     private static final Logger LOG = LoggerFactory.getLogger(HybridSplitAssigner.class);
 
