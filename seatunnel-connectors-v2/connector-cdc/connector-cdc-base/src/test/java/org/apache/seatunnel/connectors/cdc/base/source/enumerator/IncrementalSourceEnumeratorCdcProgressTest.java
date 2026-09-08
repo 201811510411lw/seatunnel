@@ -25,6 +25,7 @@ import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressPhase;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
+import org.apache.seatunnel.connectors.cdc.base.source.split.IncrementalSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
 
@@ -111,7 +112,16 @@ class IncrementalSourceEnumeratorCdcProgressTest {
                         null, Collections.emptySet(), assignedSplits, completedOffsets);
         HybridSplitAssigner splitAssigner =
                 new HybridSplitAssigner<>(assignerContext, 1, 1, checkpointState, null, null);
-        splitAssigner.getIncrementalSplitAssigner().setSplitAssigned(true);
+        splitAssigner
+                .getIncrementalSplitAssigner()
+                .registerAssignedSplits(
+                        Collections.singletonList(
+                                new IncrementalSplit(
+                                        "incremental-split-0",
+                                        Arrays.asList(table1, table2),
+                                        null,
+                                        null,
+                                        Collections.emptyList())));
 
         @SuppressWarnings("unchecked")
         SourceSplitEnumerator.Context<SourceSplitBase> runtimeContext =
@@ -142,9 +152,7 @@ class IncrementalSourceEnumeratorCdcProgressTest {
     }
 
     private static void assertRestoredPhase(
-            boolean assignerCompleted,
-            int restoredParallelism,
-            CdcProgressPhase expectedPhase) {
+            boolean assignerCompleted, int restoredParallelism, CdcProgressPhase expectedPhase) {
         TableId table = TableId.parse("sales.orders");
         SnapshotSplit assignedSplit = split("sales.orders.0", table);
         Map<String, SnapshotSplit> assignedSplits =
@@ -184,8 +192,7 @@ class IncrementalSourceEnumeratorCdcProgressTest {
         enumerator.registerReader(0);
 
         ArgumentCaptor<SourceEvent> event = ArgumentCaptor.forClass(SourceEvent.class);
-        Mockito.verify(runtimeContext)
-                .sendEventToSourceReader(Mockito.eq(0), event.capture());
+        Mockito.verify(runtimeContext).sendEventToSourceReader(Mockito.eq(0), event.capture());
         assertEquals(expectedPhase, ((CdcProgressEvent) event.getValue()).getPhase());
     }
 

@@ -23,6 +23,7 @@ import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.PendingS
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsAckEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
+import org.apache.seatunnel.connectors.cdc.base.source.event.IncrementalSplitReportEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SourceSplitBase;
 
@@ -48,6 +49,8 @@ public class IncrementalSourceEnumerator
 
     /** using TreeSet to prefer assigning incremental split to task-0 for easier debug */
     private final TreeSet<Integer> readersAwaitingSplit;
+
+    private final TreeSet<Integer> readersWithSplitReport = new TreeSet<>();
 
     private volatile boolean running;
 
@@ -87,6 +90,7 @@ public class IncrementalSourceEnumerator
     @Override
     public void addSplitsBack(List<SourceSplitBase> splits, int subtaskId) {
         LOG.debug("Incremental Source Enumerator adds splits back: {}", splits);
+        readersWithSplitReport.remove(subtaskId);
         splitAssigner.addSplits(splits);
         publishCdcProgress();
     }
@@ -103,7 +107,21 @@ public class IncrementalSourceEnumerator
 
     @Override
     public void handleSourceEvent(int subtaskId, SourceEvent sourceEvent) {
-        if (sourceEvent instanceof CompletedSnapshotSplitsReportEvent) {
+        if (sourceEvent instanceof IncrementalSplitReportEvent) {
+            IncrementalSplitReportEvent report = (IncrementalSplitReportEvent) sourceEvent;
+            if (splitAssigner instanceof HybridSplitAssigner) {
+                ((HybridSplitAssigner) splitAssigner)
+                        .getIncrementalSplitAssigner()
+                        .registerAssignedSplits(report.getSplits());
+            } else if (splitAssigner instanceof IncrementalSplitAssigner) {
+                ((IncrementalSplitAssigner) splitAssigner)
+                        .registerAssignedSplits(report.getSplits());
+            }
+            readersWithSplitReport.add(subtaskId);
+            if (running) {
+                assignSplits();
+            }
+        } else if (sourceEvent instanceof CompletedSnapshotSplitsReportEvent) {
             LOG.debug(
                     "The enumerator receives completed split watermarks(log offset) {} from subtask {}.",
                     sourceEvent,
@@ -163,6 +181,9 @@ public class IncrementalSourceEnumerator
     // ------------------------------------------------------------------------------------------
 
     private void assignSplits() {
+        if (readersWithSplitReport.size() < context.currentParallelism()) {
+            return;
+        }
         final Iterator<Integer> awaitingReader = readersAwaitingSplit.iterator();
 
         while (awaitingReader.hasNext()) {

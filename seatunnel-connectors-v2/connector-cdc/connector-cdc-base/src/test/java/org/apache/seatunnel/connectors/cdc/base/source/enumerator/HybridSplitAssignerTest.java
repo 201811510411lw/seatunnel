@@ -20,6 +20,7 @@ package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.HybridPendingSplitsState;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.SnapshotPhaseState;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
+import org.apache.seatunnel.connectors.cdc.base.source.split.IncrementalSplit;
 import org.apache.seatunnel.connectors.cdc.base.source.split.SnapshotSplit;
 
 import org.junit.jupiter.api.Assertions;
@@ -59,7 +60,18 @@ public class HybridSplitAssignerTest {
                         checkpointState.getSnapshotPhaseState().getSplitCompletedOffsets());
         HybridSplitAssigner splitAssigner =
                 new HybridSplitAssigner<>(context, 1, 1, checkpointState, null, null);
-        splitAssigner.getIncrementalSplitAssigner().setSplitAssigned(true);
+        splitAssigner
+                .getIncrementalSplitAssigner()
+                .registerAssignedSplits(
+                        Collections.singletonList(
+                                new IncrementalSplit(
+                                        "incremental-split-0",
+                                        Arrays.asList(
+                                                TableId.parse("db1.table1"),
+                                                TableId.parse("db1.table2")),
+                                        null,
+                                        null,
+                                        Collections.emptyList())));
 
         Assertions.assertFalse(
                 splitAssigner.completedSnapshotPhase(Arrays.asList(TableId.parse("db1.table1"))));

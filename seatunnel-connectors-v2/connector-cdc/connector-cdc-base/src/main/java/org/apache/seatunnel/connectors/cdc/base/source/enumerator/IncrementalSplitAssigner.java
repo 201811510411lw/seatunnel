@@ -17,8 +17,6 @@
 
 package org.apache.seatunnel.connectors.cdc.base.source.enumerator;
 
-import org.apache.seatunnel.shade.com.google.common.annotations.VisibleForTesting;
-
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.source.enumerator.state.IncrementalPhaseState;
@@ -97,7 +95,7 @@ public class IncrementalSplitAssigner<C extends SourceConfig> implements SplitAs
             Iterator<IncrementalSplit> iterator = remainingSplits.iterator();
             IncrementalSplit split = iterator.next();
             iterator.remove();
-            assignedSplits.put(split.splitId(), split);
+            registerAssignedSplits(java.util.Collections.singletonList(split));
             return Optional.of(split);
         }
         if (splitAssigned) {
@@ -136,11 +134,15 @@ public class IncrementalSplitAssigner<C extends SourceConfig> implements SplitAs
 
     @Override
     public void addSplits(Collection<SourceSplitBase> splits) {
-        // we don't store the split, but will re-create incremental split later
         splits.stream()
                 .map(SourceSplitBase::asIncrementalSplit)
                 .forEach(
                         incrementalSplit -> {
+                            assignedSplits.remove(incrementalSplit.splitId());
+                            remainingSplits.removeIf(
+                                    pending ->
+                                            pending.splitId().equals(incrementalSplit.splitId()));
+                            remainingSplits.add(incrementalSplit);
                             Offset startupOffset = incrementalSplit.getStartupOffset();
                             List<CompletedSnapshotSplitInfo> completedSnapshotSplitInfos =
                                     incrementalSplit.getCompletedSnapshotSplitInfos();
@@ -263,13 +265,10 @@ public class IncrementalSplitAssigner<C extends SourceConfig> implements SplitAs
                 historyTableChanges);
     }
 
-    @VisibleForTesting
-    void setSplitAssigned(boolean assigned) {
-        this.splitAssigned = assigned;
-    }
-
     public boolean completedSnapshotPhase(List<TableId> tableIds) {
-        checkArgument(splitAssigned && noMoreSplits());
+        Set<TableId> assignedTables = new HashSet<>();
+        assignedSplits.values().forEach(split -> assignedTables.addAll(split.getTableIds()));
+        checkArgument(assignedTables.containsAll(tableIds));
 
         for (String splitKey : new ArrayList<>(context.getAssignedSnapshotSplit().keySet())) {
             SnapshotSplit assignedSplit = context.getAssignedSnapshotSplit().get(splitKey);
@@ -284,5 +283,14 @@ public class IncrementalSplitAssigner<C extends SourceConfig> implements SplitAs
 
     public boolean waitingForAssignedSplits() {
         return !(splitAssigned && noMoreSplits());
+    }
+
+    public void registerAssignedSplits(Collection<IncrementalSplit> splits) {
+        for (IncrementalSplit split : splits) {
+            assignedSplits.put(split.splitId(), split);
+        }
+        if (getRemainingTables().isEmpty()) {
+            splitAssigned = true;
+        }
     }
 }

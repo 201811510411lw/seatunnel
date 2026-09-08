@@ -26,6 +26,7 @@ import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
+import org.apache.seatunnel.connectors.cdc.base.source.event.IncrementalSplitReportEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
 import org.apache.seatunnel.connectors.cdc.base.source.offset.Offset;
 import org.apache.seatunnel.connectors.cdc.base.source.split.IncrementalSplit;
@@ -116,6 +117,8 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
     public void pollNext(Collector<T> output) throws Exception {
         if (!running) {
             if (getNumberOfCurrentlyAssignedSplits() == 0) {
+                context.sendSourceEventToEnumerator(
+                        new IncrementalSplitReportEvent(new ArrayList<>()));
                 context.sendSplitRequest();
             }
             running = true;
@@ -140,6 +143,12 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
 
     @Override
     public void addSplits(List<SourceSplitBase> splits) {
+        context.sendSourceEventToEnumerator(
+                new IncrementalSplitReportEvent(
+                        splits.stream()
+                                .filter(SourceSplitBase::isIncrementalSplit)
+                                .map(SourceSplitBase::asIncrementalSplit)
+                                .collect(Collectors.toList())));
         // restore for finishedUnackedSplits
         List<SourceSplitBase> unfinishedSplits = new ArrayList<>();
         log.info(
