@@ -97,6 +97,9 @@ mvn -f seatunnel-transforms-v2/pom.xml \
 
 ## 后续维护和发布边界
 
+Paimon 固定分桶路由修复与旧状态迁移约束见 `docs/chronoforge-paimon-routing.md`。
+该修复属于后续源码变更，不包含在下面记录的历史发布镜像及 414 项验证结果中。
+
 本次归集验证（2026-09-09）：上述八个 Maven 步骤均成功，CDC Base 44、Flink
 Checkpoint 1、Paimon Checkpoint 2、Transform 367 项测试全部通过，共 414 项。
 清理受影响模块旧产物后重建，四个覆盖 JAR 的 SHA-256 全部与上面的发布清单一致。

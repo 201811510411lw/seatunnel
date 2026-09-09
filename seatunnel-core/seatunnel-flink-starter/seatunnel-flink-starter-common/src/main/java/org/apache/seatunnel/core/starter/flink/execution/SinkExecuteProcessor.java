@@ -21,14 +21,17 @@ import org.apache.seatunnel.shade.com.typesafe.config.Config;
 
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.translation.flink.sink.FlinkSink;
 
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.transformations.SinkV1Adapter;
 
 import java.net.URL;
 import java.util.List;
+import java.util.Optional;
 
 /** Sink execute processor for Flink 1.15. */
 public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
@@ -44,10 +47,24 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
     @Override
     protected DataStreamSink<SeaTunnelRow> createVersionSpecificDataStreamSink(
             DataStreamTableInfo stream, SeaTunnelSink sink, int parallelism, Config sinkConfig) {
-        return stream.getDataStream()
-                .sinkTo(
-                        SinkV1Adapter.wrap(
-                                new FlinkSink<>(sink, stream.getCatalogTables(), parallelism)))
-                .name(String.format("%s-Sink", sink.getPluginName()));
+        DataStream<SeaTunnelRow> input = stream.getDataStream();
+        Optional<SinkWriteRouting> routing = sink.getWriteRouting();
+        if (routing.isPresent()) {
+            input =
+                    input.partitionCustom(
+                            new SinkWriteRoutingPartitioner(),
+                            new SinkWriteRoutingPartitioner.RoutingKeySelector(
+                                    routing.get(), parallelism));
+        }
+        DataStreamSink<SeaTunnelRow> result =
+                input.sinkTo(
+                                SinkV1Adapter.wrap(
+                                        new FlinkSink<>(
+                                                sink, stream.getCatalogTables(), parallelism)))
+                        .name(String.format("%s-Sink", sink.getPluginName()));
+        if (routing.isPresent()) {
+            result.setParallelism(parallelism);
+        }
+        return result;
     }
 }

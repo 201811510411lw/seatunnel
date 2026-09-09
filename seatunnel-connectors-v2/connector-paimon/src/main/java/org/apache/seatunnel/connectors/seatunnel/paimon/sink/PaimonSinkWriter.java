@@ -22,6 +22,7 @@ import org.apache.seatunnel.shade.org.apache.commons.lang3.StringUtils;
 
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.configuration.ReadonlyConfig;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSinkWriter;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSinkWriter;
@@ -48,6 +49,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.sink.state.PaimonSinkSta
 import org.apache.seatunnel.connectors.seatunnel.paimon.utils.RowConverter;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
@@ -56,10 +58,12 @@ import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.sink.TableWrite;
 import org.apache.paimon.utils.BranchManager;
+import org.apache.paimon.utils.SnapshotManager;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -72,6 +76,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.disk.IOManagerImpl.splitPaths;
@@ -120,6 +125,75 @@ public class PaimonSinkWriter
     private final int taskIndex;
 
     private final Set<PaimonBucketAssigner> bucketAssigners = new HashSet<>();
+
+    private SinkWriteRouting writeRouting;
+
+    private String recoveryCommitUser;
+
+    private long recoveryCheckpointId;
+
+    public void setWriteRouting(SinkWriteRouting writeRouting) {
+        this.writeRouting = writeRouting;
+    }
+
+    void deferRecoveryUntilGlobalCommit(PaimonSinkState state) {
+        if (state.getCommitTables().stream()
+                .anyMatch(
+                        message ->
+                                !(message instanceof CommitMessageImpl)
+                                        || !((CommitMessageImpl) message).isEmpty())) {
+            recoveryCommitUser = state.getCommitUser();
+            recoveryCheckpointId = state.getCheckpointId();
+            tableWriteClose(tableWrite);
+            tableWrite = null;
+        }
+    }
+
+    private void awaitRecoveredGlobalCommit() throws IOException {
+        if (recoveryCommitUser == null) {
+            return;
+        }
+        long timeoutNanos =
+                TimeUnit.MILLISECONDS.toNanos(
+                        Math.max(0L, Math.min(30_000L, paimonTable.coreOptions().commitTimeout())));
+        long started = System.nanoTime();
+        SnapshotManager snapshotManager = paimonTable.snapshotManager();
+        while (true) {
+            Optional<Snapshot> snapshot;
+            try {
+                snapshot =
+                        PaimonSecurityContext.runSecured(
+                                () -> {
+                                    snapshotManager.invalidateCache();
+                                    return snapshotManager.latestSnapshotOfUser(recoveryCommitUser);
+                                });
+            } catch (Exception failure) {
+                throw new IOException("Unable to verify recovered Paimon global commit", failure);
+            }
+            if (snapshot.isPresent() && snapshot.get().commitIdentifier() >= recoveryCheckpointId) {
+                newTableWrite();
+                recoveryCommitUser = null;
+                return;
+            }
+            long remainingNanos = timeoutNanos - (System.nanoTime() - started);
+            if (remainingNanos <= 0) {
+                throw new IOException(
+                        "Timed out waiting for Paimon global commit at checkpoint "
+                                + recoveryCheckpointId
+                                + "; last confirmed checkpoint="
+                                + snapshot.map(Snapshot::commitIdentifier).orElse(-1L)
+                                + "; refusing to write or checkpoint incomplete recovery");
+            }
+            try {
+                TimeUnit.NANOSECONDS.sleep(
+                        Math.min(TimeUnit.MILLISECONDS.toNanos(50), remainingNanos));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException(
+                        "Interrupted while waiting for Paimon global commit", interrupted);
+            }
+        }
+    }
 
     public PaimonSinkWriter(
             Context context,
@@ -214,8 +288,7 @@ public class PaimonSinkWriter
                                             PaimonSinkState::getCheckpointId,
                                             PaimonSinkState::getCommitTables,
                                             (left, right) -> {
-                                                List<CommitMessage> merged =
-                                                        new ArrayList<>(left);
+                                                List<CommitMessage> merged = new ArrayList<>(left);
                                                 merged.addAll(right);
                                                 return merged;
                                             }));
@@ -234,6 +307,11 @@ public class PaimonSinkWriter
 
     @Override
     public void write(SeaTunnelRow element) throws IOException {
+        awaitRecoveredGlobalCommit();
+        if (writeRouting != null && writeRouting.route(element, parallelism) != taskIndex) {
+            throw new IllegalStateException(
+                    "Paimon row reached a writer that does not own its bucket");
+        }
         InternalRow rowData =
                 RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema);
         try {
@@ -269,6 +347,10 @@ public class PaimonSinkWriter
 
     @Override
     public void applySchemaChange(SchemaChangeEvent event) throws IOException {
+        if (writeRouting != null) {
+            throw new UnsupportedOperationException(
+                    "Online schema evolution is not supported with Paimon bucket routing");
+        }
         this.sourceTableSchema =
                 new AlterPaimonTableSchemaEventHandler(
                                 sourceTableSchema,
@@ -311,6 +393,7 @@ public class PaimonSinkWriter
 
     @Override
     public Optional<PaimonCommitInfo> prepareCommit(long checkpointId) throws IOException {
+        awaitRecoveredGlobalCommit();
         try {
             List<CommitMessage> fileCommittables =
                     ((StreamTableWrite) tableWrite).prepareCommit(waitCompaction(), checkpointId);
@@ -331,8 +414,14 @@ public class PaimonSinkWriter
 
     @Override
     public List<PaimonSinkState> snapshotState(long checkpointId) throws IOException {
+        awaitRecoveredGlobalCommit();
         PaimonSinkState paimonSinkState =
                 new PaimonSinkState(new ArrayList<>(committables), commitUser, checkpointId);
+        if (writeRouting != null) {
+            paimonSinkState.setBucketRoutingVersion(2);
+            paimonSinkState.setWriterParallelism(parallelism);
+            paimonSinkState.setWriterIndex(taskIndex);
+        }
         committables.clear();
         return Collections.singletonList(paimonSinkState);
     }

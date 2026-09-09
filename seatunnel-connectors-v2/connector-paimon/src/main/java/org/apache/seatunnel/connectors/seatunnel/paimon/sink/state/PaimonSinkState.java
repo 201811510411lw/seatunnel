@@ -19,7 +19,6 @@ package org.apache.seatunnel.connectors.seatunnel.paimon.sink.state;
 
 import org.apache.paimon.table.sink.CommitMessage;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
 import java.io.Serializable;
@@ -27,7 +26,6 @@ import java.util.List;
 
 /** Paimon sink state class, save the list of has pre committed messages. */
 @Data
-@AllArgsConstructor
 public class PaimonSinkState implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -37,4 +35,16 @@ public class PaimonSinkState implements Serializable {
     private String commitUser;
 
     private long checkpointId;
+
+    private int bucketRoutingVersion;
+
+    private int writerParallelism;
+
+    private int writerIndex;
+
+    public PaimonSinkState(List<CommitMessage> commitTables, String commitUser, long checkpointId) {
+        this.commitTables = commitTables;
+        this.commitUser = commitUser;
+        this.checkpointId = checkpointId;
+    }
 }

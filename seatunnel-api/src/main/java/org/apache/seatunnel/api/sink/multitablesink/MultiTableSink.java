@@ -24,6 +24,7 @@ import org.apache.seatunnel.api.serialization.Serializer;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
 import org.apache.seatunnel.api.sink.SinkCommitter;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
@@ -55,6 +56,7 @@ public class MultiTableSink
 
     @Getter private final Map<TablePath, SeaTunnelSink> sinks;
     private final int replicaNum;
+    private boolean writeRoutingEnabled;
 
     public MultiTableSink(MultiTableFactoryContext context) {
         this.sinks = context.getSinks();
@@ -65,6 +67,57 @@ public class MultiTableSink
     @Override
     public String getPluginName() {
         return "MultiTableSink";
+    }
+
+    @Override
+    public Optional<SinkWriteRouting> getWriteRouting() {
+        Map<String, SinkWriteRouting> routes = new HashMap<>();
+        java.util.Set<String> targets = new java.util.HashSet<>();
+        for (Map.Entry<TablePath, SeaTunnelSink> entry : sinks.entrySet()) {
+            Optional<SinkWriteRouting> route = entry.getValue().getWriteRouting();
+            if (route.isPresent()) {
+                if (!targets.add(route.get().targetIdentifier())) {
+                    throw new IllegalArgumentException(
+                            "Multiple source tables cannot create independent routed writers for "
+                                    + "the same physical target; merge them before the sink");
+                }
+                routes.put(entry.getKey().toString(), route.get());
+            }
+        }
+        if (routes.isEmpty()) {
+            return Optional.empty();
+        }
+        if (routes.size() != sinks.size() || replicaNum != 1) {
+            throw new UnsupportedOperationException(
+                    "Bucket-routed multi-table sinks require routing for every table and "
+                            + "multi_table_sink_replica = 1");
+        }
+        writeRoutingEnabled = true;
+        return Optional.of(new MultiTableWriteRouting(routes));
+    }
+
+    private static final class MultiTableWriteRouting implements SinkWriteRouting {
+
+        private final Map<String, SinkWriteRouting> routes;
+
+        private MultiTableWriteRouting(Map<String, SinkWriteRouting> routes) {
+            this.routes = routes;
+        }
+
+        @Override
+        public int route(SeaTunnelRow row, int numberOfWriters) {
+            SinkWriteRouting routing = routes.get(row.getTableId());
+            if (routing == null) {
+                throw new IllegalArgumentException(
+                        "Unknown table in bucket-routed multi-table sink");
+            }
+            return routing.route(row, numberOfWriters);
+        }
+
+        @Override
+        public String targetIdentifier() {
+            return routes.keySet().toString();
+        }
     }
 
     @Override
@@ -89,6 +142,25 @@ public class MultiTableSink
     @Override
     public SinkWriter<SeaTunnelRow, MultiTableCommitInfo, MultiTableState> restoreWriter(
             SinkWriter.Context context, List<MultiTableState> states) throws IOException {
+        boolean mergeRoutedWriters =
+                writeRoutingEnabled && context.getNumberOfParallelSubtasks() == 1;
+        if (writeRoutingEnabled) {
+            if (replicaNum != 1 || states == null || states.isEmpty()) {
+                throw new IllegalStateException("Missing or unsupported routed multi-table state");
+            }
+            java.util.Set<String> expectedTables =
+                    sinks.keySet().stream().map(TablePath::toString).collect(Collectors.toSet());
+            for (MultiTableState state : states) {
+                if (state.getStates().size() != expectedTables.size()
+                        || !state.getStates().keySet().stream()
+                                .map(SinkIdentifier::getTableIdentifier)
+                                .collect(Collectors.toSet())
+                                .equals(expectedTables)) {
+                    throw new IllegalStateException(
+                            "Cannot restore routed multi-table state with changed table topology");
+                }
+            }
+        }
         Map<SinkIdentifier, SinkWriter<SeaTunnelRow, ?, ?>> writers = new HashMap<>();
         Map<SinkIdentifier, SinkWriter.Context> sinkWritersContext = new HashMap<>();
 
@@ -99,13 +171,26 @@ public class MultiTableSink
                 SinkIdentifier sinkIdentifier = SinkIdentifier.of(tablePath.toString(), index);
                 List<?> state =
                         states.stream()
-                                .map(
+                                .flatMap(
                                         multiTableState ->
-                                                multiTableState.getStates().get(sinkIdentifier))
+                                                multiTableState.getStates().entrySet().stream())
+                                .filter(
+                                        entry ->
+                                                mergeRoutedWriters
+                                                        ? entry.getKey()
+                                                                .getTableIdentifier()
+                                                                .equals(tablePath.toString())
+                                                        : entry.getKey().equals(sinkIdentifier))
+                                .map(Map.Entry::getValue)
                                 .filter(Objects::nonNull)
                                 .flatMap(Collection::stream)
                                 .collect(Collectors.toList());
                 if (state.isEmpty()) {
+                    if (writeRoutingEnabled) {
+                        throw new IllegalStateException(
+                                "Cannot restore routed multi-table sink with missing writer state; "
+                                        + "legacy state and topology changes require a fresh snapshot");
+                    }
                     writers.put(
                             sinkIdentifier,
                             sink.createWriter(new SinkContextProxy(index, replicaNum, context)));

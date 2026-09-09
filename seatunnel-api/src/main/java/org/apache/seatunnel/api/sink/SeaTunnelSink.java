@@ -82,6 +82,10 @@ public interface SeaTunnelSink<IN, StateT, CommitInfoT, AggregatedCommitInfoT>
      */
     SinkWriter<IN, CommitInfoT, StateT> createWriter(SinkWriter.Context context) throws IOException;
 
+    default Optional<SinkWriteRouting> getWriteRouting() {
+        return Optional.empty();
+    }
+
     default SinkWriter<IN, CommitInfoT, StateT> restoreWriter(
             SinkWriter.Context context, List<StateT> states) throws IOException {
         return createWriter(context);

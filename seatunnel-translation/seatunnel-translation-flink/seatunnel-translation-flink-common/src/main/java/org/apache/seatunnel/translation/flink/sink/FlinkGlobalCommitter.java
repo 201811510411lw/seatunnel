@@ -46,10 +46,19 @@ public class FlinkGlobalCommitter<CommT, GlobalCommT>
 
     private final SinkAggregatedCommitter<CommT, GlobalCommT> aggregatedCommitter;
 
+    private final boolean recoverGlobalCommits;
+
     private MultiTableResourceManager resourceManager;
 
     FlinkGlobalCommitter(SinkAggregatedCommitter<CommT, GlobalCommT> aggregatedCommitter) {
+        this(aggregatedCommitter, false);
+    }
+
+    FlinkGlobalCommitter(
+            SinkAggregatedCommitter<CommT, GlobalCommT> aggregatedCommitter,
+            boolean recoverGlobalCommits) {
         this.aggregatedCommitter = aggregatedCommitter;
+        this.recoverGlobalCommits = recoverGlobalCommits;
         if (this.aggregatedCommitter instanceof SupportResourceShare) {
             resourceManager =
                     ((SupportResourceShare) this.aggregatedCommitter)
@@ -65,6 +74,13 @@ public class FlinkGlobalCommitter<CommT, GlobalCommT>
     @Override
     public List<GlobalCommT> filterRecoveredCommittables(List globalCommittables)
             throws IOException {
+        if (recoverGlobalCommits && !globalCommittables.isEmpty()) {
+            List<GlobalCommT> remaining = aggregatedCommitter.commit(globalCommittables);
+            if (remaining != null && !remaining.isEmpty()) {
+                throw new IOException(
+                        "Incomplete routed sink global recovery; refusing to discard state");
+            }
+        }
         return Collections.emptyList();
     }
 
@@ -78,6 +94,10 @@ public class FlinkGlobalCommitter<CommT, GlobalCommT>
     public List<GlobalCommT> commit(List<GlobalCommT> globalCommittables) throws IOException {
         List<GlobalCommT> reCommittable = aggregatedCommitter.commit(globalCommittables);
         if (reCommittable != null && !reCommittable.isEmpty()) {
+            if (recoverGlobalCommits) {
+                throw new IOException(
+                        "Incomplete routed sink global commit; refusing to discard state");
+            }
             log.warn("this version not support re-commit when use flink engine");
         }
         // TODO re-commit the data

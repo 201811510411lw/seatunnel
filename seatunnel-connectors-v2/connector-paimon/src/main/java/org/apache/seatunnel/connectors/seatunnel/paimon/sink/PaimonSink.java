@@ -26,6 +26,7 @@ import org.apache.seatunnel.api.serialization.Serializer;
 import org.apache.seatunnel.api.sink.SaveModeHandler;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSink;
 import org.apache.seatunnel.api.sink.SupportSaveMode;
@@ -42,6 +43,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.handler.PaimonSaveModeHandler;
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitter;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
@@ -55,8 +57,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -90,6 +95,8 @@ public class PaimonSink
     private final PaimonBucketAssignerFactory paimonBucketAssignerFactory;
 
     private final String commitUser = UUID.randomUUID().toString();
+
+    private SinkWriteRouting writeRouting;
 
     public PaimonSink(ReadonlyConfig readonlyConfig, CatalogTable catalogTable) {
         this.readonlyConfig = readonlyConfig;
@@ -131,17 +138,31 @@ public class PaimonSink
     }
 
     @Override
+    public Optional<SinkWriteRouting> getWriteRouting() {
+        if (paimonTable == null) {
+            throw new IllegalStateException("Paimon table must be loaded before building routing");
+        }
+        writeRouting =
+                new PaimonWriteRouting(
+                        paimonTable, catalogTable.getTableSchema().toPhysicalRowDataType());
+        return Optional.of(writeRouting);
+    }
+
+    @Override
     public PaimonSinkWriter createWriter(SinkWriter.Context context) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+        PaimonSinkWriter writer =
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory);
+        writer.setWriteRouting(writeRouting);
+        return writer;
     }
 
     @Override
@@ -153,17 +174,72 @@ public class PaimonSink
     @Override
     public SinkWriter<SeaTunnelRow, PaimonCommitInfo, PaimonSinkState> restoreWriter(
             SinkWriter.Context context, List<PaimonSinkState> states) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                states,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+        if (writeRouting != null) {
+            validateRoutedWriterState(context, states);
+            if (context.getNumberOfParallelSubtasks() > 1) {
+                PaimonSinkWriter writer = createWriter(context);
+                writer.deferRecoveryUntilGlobalCommit(states.get(0));
+                return writer;
+            }
+        }
+        PaimonSinkWriter writer =
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        states,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory);
+        writer.setWriteRouting(writeRouting);
+        return writer;
+    }
+
+    private void validateRoutedWriterState(
+            SinkWriter.Context context, List<PaimonSinkState> states) {
+        if (states == null || states.isEmpty()) {
+            throw new IllegalStateException(
+                    "Cannot restore routed Paimon sink without writer state");
+        }
+        PaimonSinkState first = states.get(0);
+        int previousParallelism = first.getWriterParallelism();
+        int currentParallelism = context.getNumberOfParallelSubtasks();
+        boolean rescaled = previousParallelism != currentParallelism;
+        if (previousParallelism < 1
+                || (first.getBucketRoutingVersion() != 1 && first.getBucketRoutingVersion() != 2)
+                || (rescaled
+                        && (currentParallelism != 1 || first.getBucketRoutingVersion() != 2))) {
+            throw new IllegalStateException(
+                    "Paimon writer restore requires compatible routed state; "
+                            + "rescaling is supported only to one writer with routing state version 2");
+        }
+        int expectedStates = rescaled ? previousParallelism : 1;
+        if (states.size() != expectedStates) {
+            throw new IllegalStateException(
+                    "Incomplete or duplicate Paimon writer state assignment");
+        }
+        Set<Integer> writerIndexes = new HashSet<>();
+        for (PaimonSinkState state : states) {
+            if (state.getBucketRoutingVersion() != first.getBucketRoutingVersion()
+                    || state.getWriterParallelism() != previousParallelism
+                    || state.getCheckpointId() != first.getCheckpointId()
+                    || state.getCommitUser() == null
+                    || !Objects.equals(state.getCommitUser(), first.getCommitUser())
+                    || state.getCommitTables() == null) {
+                throw new IllegalStateException("Inconsistent Paimon writer recovery boundary");
+            }
+            if (state.getBucketRoutingVersion() == 2
+                    && (state.getWriterIndex() < 0
+                            || state.getWriterIndex() >= previousParallelism
+                            || !writerIndexes.add(state.getWriterIndex())
+                            || (!rescaled
+                                    && state.getWriterIndex() != context.getIndexOfSubtask()))) {
+                throw new IllegalStateException("Invalid or duplicate Paimon writer identity");
+            }
+        }
     }
 
     @Override

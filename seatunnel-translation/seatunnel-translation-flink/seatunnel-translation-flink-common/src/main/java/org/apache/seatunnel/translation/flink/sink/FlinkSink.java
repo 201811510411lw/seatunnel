@@ -81,8 +81,23 @@ public class FlinkSink<InputT, CommT, WriterStateT, GlobalCommT>
         org.apache.seatunnel.api.sink.SinkWriter.Context stContext =
                 new FlinkSinkWriterContext(context, parallelism);
         if (states == null || states.isEmpty()) {
+            if (context.getRestoredCheckpointId().isPresent()
+                    && sink.getWriteRouting().isPresent()) {
+                throw new IllegalStateException(
+                        "Cannot restore bucket-routed sink without writer state; "
+                                + "legacy savepoints and rescaled empty assignments require a fresh snapshot");
+            }
             return new FlinkSinkWriter<>(sink.createWriter(stContext), 1, stContext);
         } else {
+            if (sink.getWriteRouting().isPresent()
+                    && states.stream()
+                            .anyMatch(
+                                    state ->
+                                            state.getCheckpointId()
+                                                    != states.get(0).getCheckpointId())) {
+                throw new IllegalStateException(
+                        "Cannot merge routed writer states from different checkpoints");
+            }
             List<WriterStateT> restoredState =
                     states.stream().map(FlinkWriterState::getState).collect(Collectors.toList());
             return new FlinkSinkWriter<>(
@@ -94,13 +109,36 @@ public class FlinkSink<InputT, CommT, WriterStateT, GlobalCommT>
 
     @Override
     public Optional<Committer<CommitWrapper<CommT>>> createCommitter() throws IOException {
-        return sink.createCommitter().map(FlinkCommitter::new);
+        Optional<Committer<CommitWrapper<CommT>>> committer =
+                sink.createCommitter().map(FlinkCommitter::new);
+        if (!committer.isPresent()
+                && sink.getWriteRouting().isPresent()
+                && sink.getWriterStateSerializer().isPresent()
+                && sink.getAggregatedCommitInfoSerializer().isPresent()) {
+            return Optional.of(new RoutingStateCommitter<>());
+        }
+        return committer;
+    }
+
+    private static final class RoutingStateCommitter<CommitT> implements Committer<CommitT> {
+
+        @Override
+        public List<CommitT> commit(List<CommitT> committables) {
+            return java.util.Collections.emptyList();
+        }
+
+        @Override
+        public void close() {}
     }
 
     @Override
     public Optional<GlobalCommitter<CommitWrapper<CommT>, GlobalCommT>> createGlobalCommitter()
             throws IOException {
-        return sink.createAggregatedCommitter().map(FlinkGlobalCommitter::new);
+        return sink.createAggregatedCommitter()
+                .map(
+                        committer ->
+                                new FlinkGlobalCommitter<>(
+                                        committer, sink.getWriteRouting().isPresent()));
     }
 
     @Override
