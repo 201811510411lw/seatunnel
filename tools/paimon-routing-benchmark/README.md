@@ -108,6 +108,8 @@ bash tools/paimon-routing-benchmark/run.sh \
 
 - `results.csv`：合并所有测量批次；原始 `*-fork*.csv` 各有表头，预热不输出。
 - `ns_per_row`：单线程 wall-clock ns / 输入行；包括路由、Writer 和完整行消费成本。
+- `cpu_ns_per_row`：测量线程的 CPU 时间 / 输入行，用于辅助区分执行成本与停顿。
+  不包含 GC 等其他线程，不能用它替换 wall-clock 验收或掩盖停顿；旧实验 CSV 无该列。
 - `allocated_bytes_per_row`：读取本地 JDK8 `com.sun.management.ThreadMXBean` 的
   `getThreadAllocatedBytes` 当前测量线程堆分配近似累计计数，用批次差值除以输入行数。
   它不是 RSS、堆存活量或全作业所有线程分配，不含其他线程，不能据此宣称整作业内存下降。

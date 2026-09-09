@@ -84,24 +84,30 @@ public final class PaimonRoutingBenchmark {
             throw new IllegalStateException("Thread allocation counters are required");
         }
         allocation.setThreadAllocatedMemoryEnabled(true);
+        if (!allocation.isCurrentThreadCpuTimeSupported()) {
+            throw new IllegalStateException("Thread CPU counters are required");
+        }
+        allocation.setThreadCpuTimeEnabled(true);
         long threadId = Thread.currentThread().getId();
         try (Fixture fixture = new Fixture(parallelism, fields, rowCount, iterations)) {
             provenance(fixture.routing.getClass());
             csv.println(
-                    "variant,sha,fork,parallelism,fields,rows,iterations,batch,ns_per_row,allocated_bytes_per_row,checksum,route_checksum");
+                    "variant,sha,fork,parallelism,fields,rows,iterations,batch,ns_per_row,allocated_bytes_per_row,checksum,route_checksum,cpu_ns_per_row");
             for (int batch = -warmups; batch < batches; batch++) {
                 fixture.reset();
                 long beforeBytes = allocation.getThreadAllocatedBytes(threadId);
+                long beforeCpu = allocation.getCurrentThreadCpuTime();
                 long started = System.nanoTime();
                 fixture.run(iterations);
                 long elapsed = System.nanoTime() - started;
+                long cpuElapsed = allocation.getCurrentThreadCpuTime() - beforeCpu;
                 long allocated = allocation.getThreadAllocatedBytes(threadId) - beforeBytes;
                 long checksum = fixture.verify();
                 blackhole = checksum;
                 if (batch >= 0) {
                     csv.printf(
                             Locale.ROOT,
-                            "%s,%s,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%d%n",
+                            "%s,%s,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%d,%.3f%n",
                             variant,
                             sha,
                             fork,
@@ -113,7 +119,8 @@ public final class PaimonRoutingBenchmark {
                             (double) elapsed / iterations,
                             (double) allocated / iterations,
                             checksum,
-                            fixture.routeChecksum);
+                            fixture.routeChecksum,
+                            (double) cpuElapsed / iterations);
                 }
             }
         }
