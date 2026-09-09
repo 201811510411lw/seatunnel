@@ -22,7 +22,6 @@ import org.apache.seatunnel.shade.org.apache.commons.lang3.StringUtils;
 
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.configuration.ReadonlyConfig;
-import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSinkWriter;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSinkWriter;
@@ -42,6 +41,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssigner;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.RowAssignerChannelComputer;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.schema.handler.AlterPaimonTableSchemaEventHandler;
@@ -126,13 +126,13 @@ public class PaimonSinkWriter
 
     private final Set<PaimonBucketAssigner> bucketAssigners = new HashSet<>();
 
-    private SinkWriteRouting writeRouting;
+    private PaimonWriteRouting writeRouting;
 
     private String recoveryCommitUser;
 
     private long recoveryCheckpointId;
 
-    public void setWriteRouting(SinkWriteRouting writeRouting) {
+    public void setWriteRouting(PaimonWriteRouting writeRouting) {
         this.writeRouting = writeRouting;
     }
 
@@ -308,12 +308,10 @@ public class PaimonSinkWriter
     @Override
     public void write(SeaTunnelRow element) throws IOException {
         awaitRecoveredGlobalCommit();
-        if (writeRouting != null && writeRouting.route(element, parallelism) != taskIndex) {
-            throw new IllegalStateException(
-                    "Paimon row reached a writer that does not own its bucket");
-        }
         InternalRow rowData =
-                RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema);
+                writeRouting == null
+                        ? RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema)
+                        : writeRouting.convertForWriter(element, parallelism, taskIndex);
         try {
             PaimonSecurityContext.runSecured(
                     () -> {

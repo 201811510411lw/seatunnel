@@ -96,7 +96,7 @@ public class PaimonSink
 
     private final String commitUser = UUID.randomUUID().toString();
 
-    private SinkWriteRouting writeRouting;
+    private PaimonWriteRouting writeRouting;
 
     public PaimonSink(ReadonlyConfig readonlyConfig, CatalogTable catalogTable) {
         this.readonlyConfig = readonlyConfig;
