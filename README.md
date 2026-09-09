@@ -1,5 +1,11 @@
 # Apache SeaTunnel
 
+## dev-liwei：ChronoForge 运行时维护分支
+
+本分支基于 SeaTunnel `2.3.13`，集中维护 ChronoForge 当前运行镜像覆盖层的源码与回归测试。
+功能清单、镜像对应关系、构建验证和后续维护约定见 [CHRONOFORGE.md](CHRONOFORGE.md)。
+不要直接合并上游 `dev` 的 `3.0.0-SNAPSHOT`，也不要将源码发布等同于镜像部署或业务验收。
+
 <img src="https://seatunnel.apache.org/image/logo.png" alt="SeaTunnel Logo" height="200px" align="right" />
 
 [![Build Workflow](https://github.com/apache/seatunnel/actions/workflows/build_main.yml/badge.svg?branch=dev)](https://github.com/apache/seatunnel/actions/workflows/build_main.yml)
@@ -93,4 +99,3 @@ More information, please refer to [FAQ](https://seatunnel.apache.org/docs/faq).
 
 ### 4. How can I contribute to SeaTunnel?
 We welcome contributions! Please refer to our [Contribution Guidelines](https://seatunnel.apache.org/docs/developer/coding-guide) for details.
-
