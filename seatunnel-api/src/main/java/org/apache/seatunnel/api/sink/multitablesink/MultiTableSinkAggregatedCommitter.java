@@ -72,6 +72,18 @@ public class MultiTableSinkAggregatedCommitter
     @Override
     public List<MultiTableAggregatedCommitInfo> commit(
             List<MultiTableAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, false);
+    }
+
+    @Override
+    public List<MultiTableAggregatedCommitInfo> restoreCommit(
+            List<MultiTableAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, true);
+    }
+
+    private List<MultiTableAggregatedCommitInfo> commit(
+            List<MultiTableAggregatedCommitInfo> aggregatedCommitInfo, boolean restoring)
+            throws IOException {
         List<MultiTableAggregatedCommitInfo> errorList = new ArrayList<>();
         for (String sinkIdentifier : aggCommitters.keySet()) {
             SinkAggregatedCommitter<?, ?> sinkCommitter = aggCommitters.get(sinkIdentifier);
@@ -85,7 +97,10 @@ public class MultiTableSinkAggregatedCommitter
                                                         .get(sinkIdentifier))
                                 .filter(Objects::nonNull)
                                 .collect(Collectors.toList());
-                List errCommitList = sinkCommitter.commit(commitInfo);
+                List errCommitList =
+                        restoring
+                                ? sinkCommitter.restoreCommit(commitInfo)
+                                : sinkCommitter.commit(commitInfo);
                 if (errCommitList.size() == 0) {
                     continue;
                 }

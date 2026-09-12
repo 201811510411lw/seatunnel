@@ -75,7 +75,7 @@ public class FlinkGlobalCommitter<CommT, GlobalCommT>
     public List<GlobalCommT> filterRecoveredCommittables(List globalCommittables)
             throws IOException {
         if (recoverGlobalCommits && !globalCommittables.isEmpty()) {
-            List<GlobalCommT> remaining = aggregatedCommitter.commit(globalCommittables);
+            List<GlobalCommT> remaining = aggregatedCommitter.restoreCommit(globalCommittables);
             if (remaining != null && !remaining.isEmpty()) {
                 throw new IOException(
                         "Incomplete routed sink global recovery; refusing to discard state");

@@ -30,7 +30,60 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
 public class MultiTableSinkAggregatedCommitterTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void shouldForwardRecoveryToEachTableAndPreserveRetries() throws IOException {
+        SinkAggregatedCommitter<String, String> first = mock(SinkAggregatedCommitter.class);
+        SinkAggregatedCommitter<String, String> second = mock(SinkAggregatedCommitter.class);
+        List<String> firstInput = Collections.singletonList("first-state");
+        List<String> secondInput = Arrays.asList("second-state-1", "second-state-2");
+        when(first.restoreCommit(firstInput)).thenReturn(Collections.singletonList("first-retry"));
+        when(second.restoreCommit(secondInput))
+                .thenReturn(Arrays.asList("second-retry-1", "second-retry-2"));
+        when(first.commit(firstInput)).thenReturn(Collections.emptyList());
+        when(second.commit(secondInput)).thenReturn(Collections.emptyList());
+        Map<String, SinkAggregatedCommitter<?, ?>> tableCommitters = new HashMap<>();
+        tableCommitters.put("first", first);
+        tableCommitters.put("second", second);
+        MultiTableSinkAggregatedCommitter committer =
+                new MultiTableSinkAggregatedCommitter(tableCommitters);
+        Map<String, Object> firstBoundary = new HashMap<>();
+        firstBoundary.put("first", "first-state");
+        firstBoundary.put("second", "second-state-1");
+        List<MultiTableAggregatedCommitInfo> input =
+                Arrays.asList(
+                        new MultiTableAggregatedCommitInfo(firstBoundary),
+                        new MultiTableAggregatedCommitInfo(
+                                Collections.singletonMap("second", "second-state-2")));
+
+        List<MultiTableAggregatedCommitInfo> retries = committer.restoreCommit(input);
+        Assertions.assertEquals(2, retries.size());
+        Map<String, Object> firstRetry = new HashMap<>();
+        firstRetry.put("first", "first-retry");
+        firstRetry.put("second", "second-retry-1");
+        Assertions.assertEquals(firstRetry, retries.get(0).getCommitInfo());
+        Assertions.assertEquals(
+                Collections.singletonMap("second", "second-retry-2"),
+                retries.get(1).getCommitInfo());
+        verify(first).restoreCommit(firstInput);
+        verify(second).restoreCommit(secondInput);
+        verify(first, never()).commit(anyList());
+        verify(second, never()).commit(anyList());
+
+        Assertions.assertTrue(committer.commit(input).isEmpty());
+        verify(first).commit(firstInput);
+        verify(second).commit(secondInput);
+        verifyNoMoreInteractions(first, second);
+    }
 
     @Test
     void testInitBeInvoked() throws IOException {

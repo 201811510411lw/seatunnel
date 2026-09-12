@@ -58,7 +58,6 @@ import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.CommitMessage;
-import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.sink.TableWrite;
@@ -137,16 +136,12 @@ public class PaimonSinkWriter
     }
 
     void deferRecoveryUntilGlobalCommit(PaimonSinkState state) {
-        if (state.getCommitTables().stream()
-                .anyMatch(
-                        message ->
-                                !(message instanceof CommitMessageImpl)
-                                        || !((CommitMessageImpl) message).isEmpty())) {
-            recoveryCommitUser = state.getCommitUser();
-            recoveryCheckpointId = state.getCheckpointId();
-            tableWriteClose(tableWrite);
-            tableWrite = null;
-        }
+        // Global recovery confirms even an empty latest boundary: earlier nonempty checkpoints
+        // can still be pending outside writer state. Only then is it safe to reopen TableWrite.
+        recoveryCommitUser = state.getCommitUser();
+        recoveryCheckpointId = state.getCheckpointId();
+        tableWriteClose(tableWrite);
+        tableWrite = null;
     }
 
     private void awaitRecoveredGlobalCommit() throws IOException {

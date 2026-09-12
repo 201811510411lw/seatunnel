@@ -58,14 +58,32 @@ public class PaimonAggregatedCommitter
     @Override
     public List<PaimonAggregatedCommitInfo> commit(
             List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, false);
+    }
+
+    @Override
+    public List<PaimonAggregatedCommitInfo> restoreCommit(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, true);
+    }
+
+    private List<PaimonAggregatedCommitInfo> commit(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo, boolean restoring) {
         aggregatedCommitInfo.stream()
                 .collect(Collectors.groupingBy(PaimonAggregatedCommitInfo::getCommitUser))
-                .forEach(this::commit);
+                .forEach((commitUser, commits) -> commit(commitUser, commits, restoring));
         return Collections.emptyList();
     }
 
-    private void commit(String commitUser, List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) {
+    private void commit(
+            String commitUser,
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo,
+            boolean restoring) {
         try (TableCommitImpl tableCommit = table.newCommit(commitUser)) {
+            if (restoring) {
+                // Restored writers also wait for a completed boundary containing no data files.
+                tableCommit.ignoreEmptyCommit(false);
+            }
             PaimonSecurityContext.runSecured(
                     () -> {
                         log.debug("Trying to commit states streaming mode");
@@ -132,8 +150,7 @@ public class PaimonAggregatedCommitter
                                                 committablesMap
                                                         .computeIfAbsent(
                                                                 checkpointId,
-                                                                id ->
-                                                                        new CopyOnWriteArrayList<>())
+                                                                id -> new CopyOnWriteArrayList<>())
                                                         .addAll(committables)));
         return committablesMap;
     }

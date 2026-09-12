@@ -23,6 +23,7 @@ import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.translation.flink.sink.FlinkRecoverySink;
 import org.apache.seatunnel.translation.flink.sink.FlinkSink;
 
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -35,6 +36,10 @@ import java.util.Optional;
 
 /** Sink execute processor for Flink 1.15. */
 public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
+
+    private static final String LEGACY_WRITER_PARALLELISM =
+            "paimon.legacy-state.writer-parallelism";
+    private static final String LEGACY_CHECKPOINT_ID = "paimon.legacy-state.checkpoint-id";
 
     protected SinkExecuteProcessor(
             List<URL> jarPaths,
@@ -56,11 +61,28 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
                             new SinkWriteRoutingPartitioner.RoutingKeySelector(
                                     routing.get(), parallelism));
         }
+        FlinkSink flinkSink = new FlinkSink<>(sink, stream.getCatalogTables(), parallelism);
+        boolean recoverGlobalCommits =
+                routing.isPresent()
+                        && sink.getWriterStateSerializer().isPresent()
+                        && sink.getAggregatedCommitInfoSerializer().isPresent();
+        int legacyWriterParallelism =
+                recoverGlobalCommits && envConfig.hasPath(LEGACY_WRITER_PARALLELISM)
+                        ? envConfig.getInt(LEGACY_WRITER_PARALLELISM)
+                        : 0;
+        long legacyCheckpointId =
+                recoverGlobalCommits && envConfig.hasPath(LEGACY_CHECKPOINT_ID)
+                        ? envConfig.getLong(LEGACY_CHECKPOINT_ID)
+                        : -1;
         DataStreamSink<SeaTunnelRow> result =
                 input.sinkTo(
-                                SinkV1Adapter.wrap(
-                                        new FlinkSink<>(
-                                                sink, stream.getCatalogTables(), parallelism)))
+                                recoverGlobalCommits
+                                        ? new FlinkRecoverySink<>(
+                                                flinkSink,
+                                                parallelism,
+                                                legacyWriterParallelism,
+                                                legacyCheckpointId)
+                                        : SinkV1Adapter.wrap(flinkSink))
                         .name(String.format("%s-Sink", sink.getPluginName()));
         if (routing.isPresent()) {
             result.setParallelism(parallelism);

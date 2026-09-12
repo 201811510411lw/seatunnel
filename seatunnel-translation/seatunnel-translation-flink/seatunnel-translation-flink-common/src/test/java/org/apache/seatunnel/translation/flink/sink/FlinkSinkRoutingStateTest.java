@@ -31,7 +31,7 @@ class FlinkSinkRoutingStateTest {
         SinkAggregatedCommitter aggregated = mock(SinkAggregatedCommitter.class);
         when(delegate.getWriteRouting()).thenReturn(Optional.of(mock(SinkWriteRouting.class)));
         when(delegate.createAggregatedCommitter()).thenReturn(Optional.of(aggregated));
-        when(aggregated.commit(Collections.singletonList("complete-boundary")))
+        when(aggregated.restoreCommit(Collections.singletonList("complete-boundary")))
                 .thenReturn(Collections.emptyList());
         FlinkSink sink = new FlinkSink(delegate, Collections.emptyList(), 2);
         try (GlobalCommitter committer = (GlobalCommitter) sink.createGlobalCommitter().get()) {
@@ -40,7 +40,8 @@ class FlinkSinkRoutingStateTest {
                             .filterRecoveredCommittables(
                                     Collections.singletonList("complete-boundary"))
                             .isEmpty());
-            verify(aggregated).commit(Collections.singletonList("complete-boundary"));
+            verify(aggregated).restoreCommit(Collections.singletonList("complete-boundary"));
+            verify(aggregated, never()).commit(any());
         }
     }
 
@@ -63,6 +64,8 @@ class FlinkSinkRoutingStateTest {
     void shouldRejectIncompleteRoutedGlobalRecovery() throws Exception {
         SinkAggregatedCommitter aggregated = mock(SinkAggregatedCommitter.class);
         when(aggregated.commit(Collections.singletonList("retry")))
+                .thenReturn(Collections.singletonList("retry"));
+        when(aggregated.restoreCommit(Collections.singletonList("retry")))
                 .thenReturn(Collections.singletonList("retry"));
         try (GlobalCommitter committer = new FlinkGlobalCommitter(aggregated, true)) {
             assertThrows(

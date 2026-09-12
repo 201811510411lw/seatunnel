@@ -78,8 +78,10 @@ Connector 测试依赖本地安装的配套 Starter/API。Flink 1.18.1 仅在 Co
 同并行度多 Writer 恢复不独立提交各自片段：首次写入、prepareCommit 或 snapshotState
 等待 Global Committer 完整提交旧边界，再重新加载 TableWrite。等待上限取 30 秒与
 Paimon commit.timeout 的较小值；超时、中断或无法确认均拒绝继续。
-无实际 data/compaction/index 增量的空提交不等待，即使消息列表非空；Paimon 默认忽略
-空提交，不保证生成对应 Checkpoint 的 snapshot。未知消息类型仍保守等待。
+恢复时，最新空提交也必须等到全局确认，因为更旧的非空消息可能仍在全局提交链路中。
+适配层通过已有 `restoreCommit` 接口确认恢复边界；Paimon 仅在恢复期间生成空边界 snapshot，
+普通运行仍忽略空提交。单 Writer 也遵守这一等待，避免自行发布最新状态越过更旧边界。
+详见 [历史提交恢复与旧状态迁移](chronoforge-paimon-recovery.md)。
 回归通过与已提交内容不同的 pending 值逐键检查，避免仅靠行数掩盖片段丢失。
 Flink Global Committer 对 routed Sink 在恢复过滤阶段重放完整提交消息，成功后才过滤；
 不能直接丢弃恢复消息让 Writer 永远等待。恢复提交失败或要求重试时拒绝恢复。

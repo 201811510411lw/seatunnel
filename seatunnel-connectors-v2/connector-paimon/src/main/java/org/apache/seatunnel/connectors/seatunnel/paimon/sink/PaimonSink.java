@@ -176,11 +176,9 @@ public class PaimonSink
             SinkWriter.Context context, List<PaimonSinkState> states) throws IOException {
         if (writeRouting != null) {
             validateRoutedWriterState(context, states);
-            if (context.getNumberOfParallelSubtasks() > 1) {
-                PaimonSinkWriter writer = createWriter(context);
-                writer.deferRecoveryUntilGlobalCommit(states.get(0));
-                return writer;
-            }
+            PaimonSinkWriter writer = createWriter(context);
+            writer.deferRecoveryUntilGlobalCommit(states.get(0));
+            return writer;
         }
         PaimonSinkWriter writer =
                 new PaimonSinkWriter(

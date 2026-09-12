@@ -40,6 +40,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.source.DataSplit;
@@ -59,6 +60,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -311,14 +313,14 @@ class PaimonCheckpointCommitTest {
     }
 
     @Test
-    void shouldRestoreIdleWriterWithoutWaitingForGlobalCommit() throws Exception {
+    void shouldWaitForCompleteGlobalCommitWhenRestoringIdleWriter() throws Exception {
         enableRouting();
         SeaTunnelRow value = row(RowKind.INSERT, 1, "pending");
         int owner = sink.getWriteRouting().get().route(value, 2);
         writeRouted(value);
         PaimonAggregatedCommitter committer =
                 (PaimonAggregatedCommitter) sink.createAggregatedCommitter().get();
-        prepareCheckpoint(committer, 1L);
+        List<PaimonAggregatedCommitInfo> fragments = prepareCheckpoint(committer, 1L);
         List<List<PaimonSinkState>> states = snapshotAndCloseWriters(1L);
         int idleWriter = 1 - owner;
         assertTrue(states.get(idleWriter).get(0).getCommitTables().isEmpty());
@@ -330,9 +332,13 @@ class PaimonCheckpointCommitTest {
                                 new DefaultSinkWriterContext(idleWriter, 2),
                                 states.get(idleWriter));
         writers.add(restored);
+        IOException failure = assertThrows(IOException.class, () -> restored.prepareCommit(2L));
+        assertTrue(failure.getMessage().contains("global commit"));
+        assertTrue(readRows(currentTable()).isEmpty());
+        committer.restoreCommit(fragments);
         assertTrue(restored.prepareCommit(2L).get().getCommittables().isEmpty());
         assertTrue(restored.snapshotState(2L).get(0).getCommitTables().isEmpty());
-        assertTrue(readRows(currentTable()).isEmpty());
+        assertEquals(Collections.singletonMap(1, "pending"), readRows(currentTable()));
     }
 
     private void accessRestoredWriter(String operation, PaimonSinkWriter writer) throws Exception {
@@ -359,7 +365,31 @@ class PaimonCheckpointCommitTest {
     }
 
     @Test
-    void shouldRestorePreviouslyActiveWritersWithOnlyEmptyCommitMessages() throws Exception {
+    void shouldConfirmAnEntirelyEmptyRecoveryWithoutChangingNormalEmptyCommits() throws Exception {
+        enableRouting();
+        PaimonAggregatedCommitter committer =
+                (PaimonAggregatedCommitter) sink.createAggregatedCommitter().get();
+        List<PaimonAggregatedCommitInfo> empty = prepareCheckpoint(committer, 1L);
+        List<List<PaimonSinkState>> states = snapshotAndCloseWriters(1L);
+        assertTrue(currentTable().snapshotManager().latestSnapshotId() == null);
+        for (int index = 0; index < states.size(); index++) {
+            writers.add(
+                    (PaimonSinkWriter)
+                            sink.restoreWriter(
+                                    new DefaultSinkWriterContext(index, 2), states.get(index)));
+        }
+        committer.restoreCommit(empty);
+        long markerSnapshot = currentTable().snapshotManager().latestSnapshotId();
+        assertEquals(1L, currentTable().snapshotManager().latestSnapshot().commitIdentifier());
+        committer.restoreCommit(empty);
+        commitCheckpoint(committer, 2L);
+        assertEquals(
+                markerSnapshot, currentTable().snapshotManager().latestSnapshotId().longValue());
+        assertTrue(readRows(currentTable()).isEmpty());
+    }
+
+    @Test
+    void shouldRestorePreviouslyActiveWritersAfterConfirmingEmptyBoundary() throws Exception {
         tearDown();
         temporaryDirectory = temporaryDirectory.resolve("empty-recovery-boundary");
         setUp(4);
@@ -371,10 +401,13 @@ class PaimonCheckpointCommitTest {
                 (PaimonAggregatedCommitter) sink.createAggregatedCommitter().get();
         commitCheckpoint(committer, 1L);
         long committedSnapshot = currentTable().snapshotManager().latestSnapshotId();
-        committer.commit(prepareCheckpoint(committer, 2L));
+        List<PaimonAggregatedCommitInfo> empty = prepareCheckpoint(committer, 2L);
+        committer.commit(empty);
         List<List<PaimonSinkState>> states = snapshotAndCloseWriters(2L);
         assertEquals(
                 committedSnapshot, currentTable().snapshotManager().latestSnapshotId().longValue());
+        committer.restoreCommit(empty);
+        assertEquals(2L, currentTable().snapshotManager().latestSnapshot().commitIdentifier());
         sink.setLoadTable(
                 currentTable().copy(Collections.singletonMap("commit.timeout", "100 ms")));
         for (int writerIndex = 0; writerIndex < 2; writerIndex++) {
@@ -408,6 +441,152 @@ class PaimonCheckpointCommitTest {
         }
         writers = new ArrayList<>();
         return states;
+    }
+
+    private static boolean hasPendingData(PaimonSinkState state) {
+        return state.getCommitTables().stream()
+                .map(CommitMessageImpl.class::cast)
+                .anyMatch(message -> !message.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 4})
+    void shouldWaitForEmptyRestoreMarkerAfterOlderPendingCommit(int buckets) throws Exception {
+        tearDown();
+        temporaryDirectory = temporaryDirectory.resolve("empty-restore-marker");
+        setUp(buckets);
+        enableRouting();
+        Map<Integer, String> expected = new LinkedHashMap<>();
+        for (int identifier = 0; identifier < 100; identifier++) {
+            writeRouted(row(RowKind.INSERT, identifier, "before"));
+        }
+        PaimonAggregatedCommitter committer =
+                (PaimonAggregatedCommitter) sink.createAggregatedCommitter().get();
+        commitCheckpoint(committer, 0L);
+        for (int identifier = 0; identifier < 100; identifier++) {
+            expected.put(identifier, "pending-" + identifier);
+            writeRouted(row(RowKind.UPDATE_AFTER, identifier, expected.get(identifier)));
+        }
+        List<PaimonAggregatedCommitInfo> older = prepareCheckpoint(committer, 1L);
+        for (PaimonSinkWriter writer : writers) {
+            writer.snapshotState(1L);
+        }
+        List<PaimonAggregatedCommitInfo> empty = prepareCheckpoint(committer, 2L);
+        List<PaimonSinkState> states = new ArrayList<>();
+        for (List<PaimonSinkState> writerStates : snapshotAndCloseWriters(2L)) {
+            states.addAll(writerStates);
+        }
+        assertTrue(states.stream().noneMatch(PaimonCheckpointCommitTest::hasPendingData));
+        writers.add(
+                (PaimonSinkWriter) sink.restoreWriter(new DefaultSinkWriterContext(0, 1), states));
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            CountDownLatch started = new CountDownLatch(1);
+            Future<?> waiting =
+                    executor.submit(
+                            () -> {
+                                started.countDown();
+                                return writers.get(0).prepareCommit(3L);
+                            });
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> waiting.get(200, TimeUnit.MILLISECONDS));
+            committer.restoreCommit(older);
+            assertThrows(TimeoutException.class, () -> waiting.get(200, TimeUnit.MILLISECONDS));
+            long beforeEmptyMarker = currentTable().snapshotManager().latestSnapshotId();
+            committer.commit(empty);
+            assertEquals(
+                    beforeEmptyMarker,
+                    currentTable().snapshotManager().latestSnapshotId().longValue(),
+                    "Normal empty checkpoints must not create snapshots");
+            committer.restoreCommit(empty);
+            assertEquals(
+                    beforeEmptyMarker + 1,
+                    currentTable().snapshotManager().latestSnapshotId().longValue());
+            assertEquals(2L, currentTable().snapshotManager().latestSnapshot().commitIdentifier());
+            waiting.get(5, TimeUnit.SECONDS);
+            committer.restoreCommit(empty);
+            assertEquals(
+                    beforeEmptyMarker + 1,
+                    currentTable().snapshotManager().latestSnapshotId().longValue(),
+                    "Restoring an already confirmed empty boundary must be idempotent");
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+        assertEquals(expected, readRows(currentTable()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 4})
+    void shouldNotPublishPendingStateWhileRestoringRoutedWritersIntoOne(int buckets)
+            throws Exception {
+        tearDown();
+        temporaryDirectory = temporaryDirectory.resolve("ordered-rescale");
+        setUp(buckets);
+        enableRouting();
+        Map<Integer, String> before = new LinkedHashMap<>();
+        Map<Integer, String> expected = new LinkedHashMap<>();
+        for (int identifier = 0; identifier < 100; identifier++) {
+            writeRouted(row(RowKind.INSERT, identifier, "before"));
+            before.put(identifier, "before");
+            expected.put(identifier, "pending-" + identifier);
+        }
+        PaimonAggregatedCommitter committer =
+                (PaimonAggregatedCommitter) sink.createAggregatedCommitter().get();
+        commitCheckpoint(committer, 0L);
+        long committedSnapshot = currentTable().snapshotManager().latestSnapshotId();
+
+        // Global recovery may still own an older boundary absent from the latest writer state.
+        for (int identifier = 0; identifier < 100; identifier += 2) {
+            writeRouted(row(RowKind.UPDATE_AFTER, identifier, expected.get(identifier)));
+        }
+        List<PaimonAggregatedCommitInfo> older = prepareCheckpoint(committer, 1L);
+        for (PaimonSinkWriter writer : writers) {
+            writer.snapshotState(1L);
+        }
+        for (int identifier = 1; identifier < 100; identifier += 2) {
+            writeRouted(row(RowKind.UPDATE_AFTER, identifier, expected.get(identifier)));
+        }
+        List<PaimonAggregatedCommitInfo> latest = prepareCheckpoint(committer, 2L);
+        List<PaimonSinkState> states = new ArrayList<>();
+        for (List<PaimonSinkState> writerStates : snapshotAndCloseWriters(2L)) {
+            states.addAll(writerStates);
+        }
+        states.sort(Comparator.comparing(PaimonCheckpointCommitTest::hasPendingData));
+        if (buckets == 1) {
+            assertFalse(hasPendingData(states.get(0)));
+            assertTrue(hasPendingData(states.get(1)));
+        }
+
+        writers.add(
+                (PaimonSinkWriter) sink.restoreWriter(new DefaultSinkWriterContext(0, 1), states));
+        assertEquals(
+                committedSnapshot,
+                currentTable().snapshotManager().latestSnapshotId().longValue(),
+                "Writer restore must not publish ahead of older global pending checkpoints");
+        assertEquals(before, readRows(currentTable()));
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            CountDownLatch started = new CountDownLatch(1);
+            Future<?> waiting =
+                    executor.submit(
+                            () -> {
+                                started.countDown();
+                                return writers.get(0).prepareCommit(3L);
+                            });
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> waiting.get(200, TimeUnit.MILLISECONDS));
+            committer.commit(older);
+            assertThrows(TimeoutException.class, () -> waiting.get(200, TimeUnit.MILLISECONDS));
+            committer.commit(latest);
+            waiting.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+        assertEquals(expected, readRows(currentTable()));
     }
 
     @ParameterizedTest
@@ -464,8 +643,13 @@ class PaimonCheckpointCommitTest {
                     currentTable().snapshotManager().latestSnapshot().commitKind());
             compactedSnapshot = currentTable().snapshotManager().latestSnapshotId();
         }
+        long snapshotBeforeRestore = currentTable().snapshotManager().latestSnapshotId();
         writers.add(
                 (PaimonSinkWriter) sink.restoreWriter(new DefaultSinkWriterContext(0, 1), states));
+        assertEquals(
+                snapshotBeforeRestore,
+                currentTable().snapshotManager().latestSnapshotId().longValue());
+        committer.commit(fragments);
         assertEquals(expected, readRows(currentTable()));
         long recoveredSnapshot = currentTable().snapshotManager().latestSnapshotId();
         if (compactedSnapshot != null) {
