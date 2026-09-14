@@ -1,9 +1,27 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.seatunnel.translation.flink.sink;
 
 import org.apache.seatunnel.api.serialization.DefaultSerializer;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
 import org.apache.seatunnel.api.sink.SinkWriteRouting;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 
 import org.apache.flink.api.connector.sink.Committer;
 import org.apache.flink.api.connector.sink.GlobalCommitter;
@@ -15,6 +33,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -22,14 +41,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class FlinkSinkRoutingStateTest {
 
     @Test
     void shouldCommitRecoveredRoutedGlobalMessagesBeforeFiltering() throws Exception {
-        SeaTunnelSink delegate = mock(SeaTunnelSink.class);
+        SeaTunnelSink delegate = routedSink();
         SinkAggregatedCommitter aggregated = mock(SinkAggregatedCommitter.class);
-        when(delegate.getWriteRouting()).thenReturn(Optional.of(mock(SinkWriteRouting.class)));
         when(delegate.createAggregatedCommitter()).thenReturn(Optional.of(aggregated));
         when(aggregated.restoreCommit(Collections.singletonList("complete-boundary")))
                 .thenReturn(Collections.emptyList());
@@ -57,6 +76,33 @@ class FlinkSinkRoutingStateTest {
                             .filterRecoveredCommittables(Collections.singletonList("legacy"))
                             .isEmpty());
             verify(aggregated, never()).commit(any());
+            verify(aggregated, never()).restoreCommit(any());
+        }
+    }
+
+    @Test
+    void shouldPreserveRecoveryBehaviorWhenRoutingCapabilityIsEmpty() throws Exception {
+        SeaTunnelSink delegate =
+                mock(
+                        SeaTunnelSink.class,
+                        withSettings().extraInterfaces(SupportSinkWriteRouting.class));
+        when(((SupportSinkWriteRouting) delegate).getWriteRouting()).thenReturn(Optional.empty());
+        when(delegate.getWriterStateSerializer())
+                .thenReturn(Optional.of(new DefaultSerializer<>()));
+        when(delegate.getAggregatedCommitInfoSerializer())
+                .thenReturn(Optional.of(new DefaultSerializer<>()));
+        SinkAggregatedCommitter aggregated = mock(SinkAggregatedCommitter.class);
+        when(delegate.createAggregatedCommitter()).thenReturn(Optional.of(aggregated));
+        FlinkSink sink = new FlinkSink(delegate, Collections.emptyList(), 2);
+
+        assertFalse(sink.createCommitter().isPresent());
+        try (GlobalCommitter committer = (GlobalCommitter) sink.createGlobalCommitter().get()) {
+            assertTrue(
+                    committer
+                            .filterRecoveredCommittables(Collections.singletonList("legacy"))
+                            .isEmpty());
+            verify(aggregated, never()).restoreCommit(any());
+            verify(aggregated, never()).commit(any());
         }
     }
 
@@ -81,8 +127,7 @@ class FlinkSinkRoutingStateTest {
 
     @Test
     void shouldKeepGlobalOnlyRoutedSinkStatefulWithoutCommittingLocally() throws Exception {
-        SeaTunnelSink delegate = mock(SeaTunnelSink.class);
-        when(delegate.getWriteRouting()).thenReturn(Optional.of(mock(SinkWriteRouting.class)));
+        SeaTunnelSink delegate = routedSink();
         when(delegate.getWriterStateSerializer())
                 .thenReturn(Optional.of(new DefaultSerializer<>()));
         when(delegate.getAggregatedCommitInfoSerializer())
@@ -95,8 +140,7 @@ class FlinkSinkRoutingStateTest {
 
     @Test
     void shouldRejectMergingDifferentCheckpointBoundaries() throws Exception {
-        SeaTunnelSink delegate = mock(SeaTunnelSink.class);
-        when(delegate.getWriteRouting()).thenReturn(Optional.of(mock(SinkWriteRouting.class)));
+        SeaTunnelSink delegate = routedSink();
         FlinkSink sink = new FlinkSink(delegate, Collections.emptyList(), 1);
         assertThrows(
                 IllegalStateException.class,
@@ -114,5 +158,15 @@ class FlinkSinkRoutingStateTest {
         SeaTunnelSink delegate = mock(SeaTunnelSink.class);
         FlinkSink sink = new FlinkSink(delegate, Collections.emptyList(), 2);
         assertTrue(!sink.createCommitter().isPresent());
+    }
+
+    private SeaTunnelSink routedSink() {
+        SeaTunnelSink sink =
+                mock(
+                        SeaTunnelSink.class,
+                        withSettings().extraInterfaces(SupportSinkWriteRouting.class));
+        when(((SupportSinkWriteRouting) sink).getWriteRouting())
+                .thenReturn(Optional.of(mock(SinkWriteRouting.class)));
+        return sink;
     }
 }

@@ -22,6 +22,7 @@ import org.apache.seatunnel.shade.com.typesafe.config.Config;
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkWriteRouting;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.translation.flink.sink.FlinkRecoverySink;
 import org.apache.seatunnel.translation.flink.sink.FlinkSink;
@@ -53,7 +54,7 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
     protected DataStreamSink<SeaTunnelRow> createVersionSpecificDataStreamSink(
             DataStreamTableInfo stream, SeaTunnelSink sink, int parallelism, Config sinkConfig) {
         DataStream<SeaTunnelRow> input = stream.getDataStream();
-        Optional<SinkWriteRouting> routing = sink.getWriteRouting();
+        Optional<SinkWriteRouting> routing = SupportSinkWriteRouting.resolve(sink);
         if (routing.isPresent()) {
             input =
                     input.partitionCustom(

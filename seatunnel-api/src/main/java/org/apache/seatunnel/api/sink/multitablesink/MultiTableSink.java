@@ -27,6 +27,7 @@ import org.apache.seatunnel.api.sink.SinkCommitter;
 import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.factory.MultiTableFactoryContext;
@@ -52,7 +53,8 @@ public class MultiTableSink
                         MultiTableState,
                         MultiTableCommitInfo,
                         MultiTableAggregatedCommitInfo>,
-                SupportSchemaEvolutionSink {
+                SupportSchemaEvolutionSink,
+                SupportSinkWriteRouting {
 
     @Getter private final Map<TablePath, SeaTunnelSink> sinks;
     private final int replicaNum;
@@ -74,7 +76,7 @@ public class MultiTableSink
         Map<String, SinkWriteRouting> routes = new HashMap<>();
         java.util.Set<String> targets = new java.util.HashSet<>();
         for (Map.Entry<TablePath, SeaTunnelSink> entry : sinks.entrySet()) {
-            Optional<SinkWriteRouting> route = entry.getValue().getWriteRouting();
+            Optional<SinkWriteRouting> route = SupportSinkWriteRouting.resolve(entry.getValue());
             if (route.isPresent()) {
                 if (!targets.add(route.get().targetIdentifier())) {
                     throw new IllegalArgumentException(

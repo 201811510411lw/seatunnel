@@ -18,6 +18,7 @@
 package org.apache.seatunnel.translation.flink.sink;
 
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.translation.flink.serialization.CommitWrapperSerializer;
@@ -82,14 +83,14 @@ public class FlinkSink<InputT, CommT, WriterStateT, GlobalCommT>
                 new FlinkSinkWriterContext(context, parallelism);
         if (states == null || states.isEmpty()) {
             if (context.getRestoredCheckpointId().isPresent()
-                    && sink.getWriteRouting().isPresent()) {
+                    && SupportSinkWriteRouting.resolve(sink).isPresent()) {
                 throw new IllegalStateException(
                         "Cannot restore bucket-routed sink without writer state; "
                                 + "legacy savepoints and rescaled empty assignments require a fresh snapshot");
             }
             return new FlinkSinkWriter<>(sink.createWriter(stContext), 1, stContext);
         } else {
-            if (sink.getWriteRouting().isPresent()
+            if (SupportSinkWriteRouting.resolve(sink).isPresent()
                     && states.stream()
                             .anyMatch(
                                     state ->
@@ -112,7 +113,7 @@ public class FlinkSink<InputT, CommT, WriterStateT, GlobalCommT>
         Optional<Committer<CommitWrapper<CommT>>> committer =
                 sink.createCommitter().map(FlinkCommitter::new);
         if (!committer.isPresent()
-                && sink.getWriteRouting().isPresent()
+                && SupportSinkWriteRouting.resolve(sink).isPresent()
                 && sink.getWriterStateSerializer().isPresent()
                 && sink.getAggregatedCommitInfoSerializer().isPresent()) {
             return Optional.of(new RoutingStateCommitter<>());
@@ -138,7 +139,8 @@ public class FlinkSink<InputT, CommT, WriterStateT, GlobalCommT>
                 .map(
                         committer ->
                                 new FlinkGlobalCommitter<>(
-                                        committer, sink.getWriteRouting().isPresent()));
+                                        committer,
+                                        SupportSinkWriteRouting.resolve(sink).isPresent()));
     }
 
     @Override

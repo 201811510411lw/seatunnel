@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.seatunnel.api.sink.multitablesink;
 
 import org.apache.seatunnel.api.configuration.ReadonlyConfig;
@@ -5,6 +22,7 @@ import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSinkWriter;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.factory.MultiTableFactoryContext;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
@@ -34,7 +52,7 @@ class MultiTableWriteRoutingTest {
         Map<TablePath, SeaTunnelSink> sinks = new HashMap<>();
         sinks.put(TablePath.of("database", "first"), sink("target-first", 0));
         sinks.put(TablePath.of("database", "second"), sink("target-second", 1));
-        SinkWriteRouting routing = multiTable(sinks, 1).getWriteRouting().get();
+        SinkWriteRouting routing = SupportSinkWriteRouting.resolve(multiTable(sinks, 1)).get();
         SeaTunnelRow row = new SeaTunnelRow(new Object[] {1});
         row.setTableId("database.first");
         assertEquals(0, routing.route(row, 2));
@@ -49,9 +67,12 @@ class MultiTableWriteRoutingTest {
         Map<TablePath, SeaTunnelSink> sinks = new HashMap<>();
         sinks.put(TablePath.of("database", "first"), sink("same-target", 0));
         assertThrows(
-                UnsupportedOperationException.class, () -> multiTable(sinks, 2).getWriteRouting());
+                UnsupportedOperationException.class,
+                () -> SupportSinkWriteRouting.resolve(multiTable(sinks, 2)));
         sinks.put(TablePath.of("database", "second"), sink("same-target", 0));
-        assertThrows(IllegalArgumentException.class, () -> multiTable(sinks, 1).getWriteRouting());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> SupportSinkWriteRouting.resolve(multiTable(sinks, 1)));
     }
 
     @Test
@@ -59,7 +80,7 @@ class MultiTableWriteRoutingTest {
         Map<TablePath, SeaTunnelSink> sinks = new HashMap<>();
         sinks.put(TablePath.of("database", "first"), sink("target", 0));
         MultiTableSink multiTable = multiTable(sinks, 1);
-        multiTable.getWriteRouting();
+        SupportSinkWriteRouting.resolve(multiTable);
         assertThrows(
                 IllegalStateException.class,
                 () ->
@@ -79,7 +100,7 @@ class MultiTableWriteRoutingTest {
                                 SinkWriter.class,
                                 withSettings().extraInterfaces(SupportMultiTableSinkWriter.class)));
         MultiTableSink multiTable = multiTable(Collections.singletonMap(table, delegate), 1);
-        multiTable.getWriteRouting();
+        SupportSinkWriteRouting.resolve(multiTable);
         multiTable.restoreWriter(
                 new org.apache.seatunnel.api.sink.DefaultSinkWriterContext(0, 1),
                 Arrays.asList(
@@ -104,7 +125,7 @@ class MultiTableWriteRoutingTest {
                                 SinkWriter.class,
                                 withSettings().extraInterfaces(SupportMultiTableSinkWriter.class)));
         MultiTableSink multiTable = multiTable(Collections.singletonMap(table, delegate), 1);
-        multiTable.getWriteRouting();
+        SupportSinkWriteRouting.resolve(multiTable);
         Map<SinkIdentifier, java.util.List<?>> oldTables = new HashMap<>();
         oldTables.put(SinkIdentifier.of(table.toString(), 0), Collections.singletonList("first"));
         oldTables.put(
@@ -121,12 +142,12 @@ class MultiTableWriteRoutingTest {
     void shouldPreserveNonRoutedSinksAndRejectMixedRouting() {
         Map<TablePath, SeaTunnelSink> sinks = new HashMap<>();
         SeaTunnelSink plain = mock(SeaTunnelSink.class);
-        when(plain.getWriteRouting()).thenReturn(Optional.empty());
         sinks.put(TablePath.of("database", "first"), plain);
-        assertTrue(!multiTable(sinks, 2).getWriteRouting().isPresent());
+        assertTrue(!SupportSinkWriteRouting.resolve(multiTable(sinks, 2)).isPresent());
         sinks.put(TablePath.of("database", "second"), sink("target", 0));
         assertThrows(
-                UnsupportedOperationException.class, () -> multiTable(sinks, 1).getWriteRouting());
+                UnsupportedOperationException.class,
+                () -> SupportSinkWriteRouting.resolve(multiTable(sinks, 1)));
     }
 
     private MultiTableSink multiTable(Map<TablePath, SeaTunnelSink> sinks, int replicas) {
@@ -139,7 +160,10 @@ class MultiTableWriteRoutingTest {
     }
 
     private SeaTunnelSink sink(String target, int owner) {
-        SeaTunnelSink sink = mock(SeaTunnelSink.class);
+        SeaTunnelSink sink =
+                mock(
+                        SeaTunnelSink.class,
+                        withSettings().extraInterfaces(SupportSinkWriteRouting.class));
         SinkWriteRouting routing =
                 new SinkWriteRouting() {
                     @Override
@@ -152,7 +176,7 @@ class MultiTableWriteRoutingTest {
                         return target;
                     }
                 };
-        when(sink.getWriteRouting()).thenReturn(Optional.of(routing));
+        when(((SupportSinkWriteRouting) sink).getWriteRouting()).thenReturn(Optional.of(routing));
         return sink;
     }
 }

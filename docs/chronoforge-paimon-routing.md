@@ -6,7 +6,18 @@
 Flink 1.15 Adapter 在 Flink 1.18.1 上的运行链路，不升级依赖的生产版本。
 它不是 Paimon 内核修复，也不是通过调整 CDC 阶段或强制 Sink 单并发规避问题。
 
-`SeaTunnelSink.getWriteRouting()` 是可选的 Connector 路由契约，默认不改变其他 Sink。
+`SupportSinkWriteRouting` 是可选的 Connector 路由能力接口；`PaimonSink` 和
+`MultiTableSink` 显式实现它，返回 `Optional<SinkWriteRouting>` 描述当前 Sink 的路由。
+`SinkWriteRouting` 继续负责 Writer 选择与物理目标标识，多表包装器按子表转发能力。
+Flink Starter、Adapter 和多表包装器通过 `SupportSinkWriteRouting.resolve(sink)`
+统一发现路由：Sink 实现能力接口时读取路由，否则不启用路由。
+`SeaTunnelSink.getWriteRouting()` 已删除，不保留旧入口；API、Adapter、Starter 和
+Connector 必须一起重新编译与发布，不支持混用改造前后的二进制。
+返回 `Optional.empty()` 表示当前 Sink 不启用路由，配置校验异常继续向上传播；发现入口不缓存路由结果，
+避免将初始化前的空结果保留到配置完成之后。
+
+此次改造只迁移路由发现入口，保留现有路由触发的受管状态与全局提交恢复行为。
+固定桶 Paimon 仍同时启用分桶保护与历史提交确认，恢复协议、状态版本、算子身份均不改变。
 Paimon 使用已经加载的物理表 schema，经 `RowConverter`、
 `FixedBucketRowKeyExtractor` 和 `ChannelComputer.select` 计算 Writer。
 Flink `SinkExecuteProcessor` 在 Sink 之前插入 custom partition 边，保持明确的 Sink
@@ -85,7 +96,9 @@ Paimon commit.timeout 的较小值；超时、中断或无法确认均拒绝继�
 回归通过与已提交内容不同的 pending 值逐键检查，避免仅靠行数掩盖片段丢失。
 Flink Global Committer 对 routed Sink 在恢复过滤阶段重放完整提交消息，成功后才过滤；
 不能直接丢弃恢复消息让 Writer 永远等待。恢复提交失败或要求重试时拒绝恢复。
-`MultiTableWriteRoutingTest` 覆盖多表选择、重复物理目标、replica 与混合路由拒绝。
+`SupportSinkWriteRoutingTest` 覆盖普通 Sink、能力接口、配置更新和校验异常透传。
+`MultiTableWriteRoutingTest` 经统一发现入口覆盖多表选择、重复物理目标、replica 与混合路由拒绝。
+`FlinkSinkRoutingStateTest` 覆盖能力接口触发既有恢复保护，并确认空路由不会启用恢复分支。
 `PaimonFlinkBucketRoutingTest` 经真实 `SinkExecuteProcessor`、Flink Adapter、
 Paimon Connector 和本地 Paimon 读回，覆盖双 Source/双 Sink、Snapshot Checkpoint
 到增量、单桶、多表多分区多桶及 Savepoint 恢复。

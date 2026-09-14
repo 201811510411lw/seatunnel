@@ -25,6 +25,7 @@ import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
 import org.apache.seatunnel.api.sink.SinkCommitter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSinkAggregatedCommitter;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.PhysicalColumn;
 import org.apache.seatunnel.api.table.catalog.PrimaryKey;
@@ -140,7 +141,7 @@ class PaimonFlinkPendingRecoveryTest {
         return input.partitionCustom(
                         new SinkWriteRoutingPartitioner(),
                         new SinkWriteRoutingPartitioner.RoutingKeySelector(
-                                sink.getWriteRouting().get(), parallelism))
+                                SupportSinkWriteRouting.resolve(sink).get(), parallelism))
                 .sinkTo(SinkV1Adapter.wrap(new FlinkSink<>(sink, tables, parallelism)))
                 .name(sink.getPluginName() + "-Sink")
                 .setParallelism(parallelism);

@@ -31,6 +31,7 @@ import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSink;
 import org.apache.seatunnel.api.sink.SupportSaveMode;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.schema.SchemaChangeType;
@@ -73,6 +74,7 @@ public class PaimonSink
                         PaimonAggregatedCommitInfo>,
                 SupportSaveMode,
                 SupportMultiTableSink,
+                SupportSinkWriteRouting,
                 SupportLoadTable<Table>,
                 SupportSchemaEvolutionSink {
 
