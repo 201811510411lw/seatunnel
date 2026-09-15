@@ -25,6 +25,7 @@ import org.apache.seatunnel.connectors.cdc.base.config.SourceConfig;
 import org.apache.seatunnel.connectors.cdc.base.dialect.DataSourceDialect;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CdcProgressEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotPhaseEvent;
+import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsAckEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.CompletedSnapshotSplitsReportEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.IncrementalSplitReportEvent;
 import org.apache.seatunnel.connectors.cdc.base.source.event.SnapshotSplitWatermark;
@@ -47,10 +48,10 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -98,7 +99,7 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
                 context);
         this.dataSourceDialect = dataSourceDialect;
         this.sourceConfig = sourceConfig;
-        this.finishedUnackedSplits = new HashMap<>();
+        this.finishedUnackedSplits = new ConcurrentHashMap<>();
         this.subtaskId = context.getIndexOfSubtask();
         this.debeziumDeserializationSchema = debeziumDeserializationSchema;
         if (subtaskId == 0) {
@@ -108,8 +109,15 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
 
     @Override
     public void handleSourceEvent(SourceEvent sourceEvent) {
-        if (sourceEvent instanceof CdcProgressEvent) {
+        if (sourceEvent instanceof CompletedSnapshotSplitsAckEvent) {
+            for (String splitId :
+                    ((CompletedSnapshotSplitsAckEvent) sourceEvent).getCompletedSplits()) {
+                finishedUnackedSplits.remove(splitId);
+            }
+        } else if (sourceEvent instanceof CdcProgressEvent) {
             cdcProgressJson = ((CdcProgressEvent) sourceEvent).toJson();
+        } else {
+            super.handleSourceEvent(sourceEvent);
         }
     }
 
@@ -216,8 +224,8 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
                     new CompletedSnapshotSplitsReportEvent();
             reportEvent.setCompletedSnapshotSplitWatermarks(completedSnapshotSplitWatermarks);
             context.sendSourceEventToEnumerator(reportEvent);
-            // TODO need enumerator return ack
-            finishedUnackedSplits.clear();
+            // Keep the splits in reader checkpoints until the enumerator acknowledges receipt.
+            // Restored readers report any unacknowledged splits again.
             log.debug(
                     "The subtask {} reports offsets of finished snapshot splits {}.",
                     subtaskId,
