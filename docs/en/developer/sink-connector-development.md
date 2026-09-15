@@ -141,6 +141,35 @@ Use an aggregated committer when:
 
 This model is especially important for table-oriented sinks and strong consistency use cases.
 
+## Writer Routing and Global Commit Recovery
+
+`SupportSinkWriteRouting<T>` lets an engine obtain a `SinkWriteRouting<T>` after loading
+the target tables. `getWriteRouting(writerCount)` binds the writer count during setup;
+the per-record path calls only `route(record)`. The policy must consistently select an
+index in `[0, writerCount)` for records owned by the same physical shard, independently
+of their row kind. `targetIdentifier()` identifies the physical target so multi-table
+wrappers can reject conflicting independent writers. Rebuild the policy when setting
+up a job at a different parallelism; this alone does not make rescaling safe.
+
+The policy is serializable and used by one task thread. Prepare reusable routing state
+outside the per-record path, and do not retain or mutate input records. Wrappers must
+forward their child policies and validate combinations before writers start. Engine
+control events, such as schema broadcasts, must preserve their intended destination
+without passing through the data routing policy.
+
+`SupportSinkGlobalCommitRecovery` is a separate capability. After routing setup, the
+engine checks `requiresGlobalCommitRecovery()` to select a protocol that restores all
+writer contributions and confirms historical global commits before writers resume.
+The capability requires writer, commit-info and aggregated-commit-info serializers,
+and an aggregated committer. A multi-table wrapper must check each active child's
+recovery contract and reject incompatible combinations. Routing alone does not enable
+this protocol. Engines without the required recovery implementation must reject the
+job rather than fall back to an unsafe recovery path.
+
+Paimon fixed-bucket routing opts into both capabilities. Its writer converts each row
+once, checks bucket ownership using that converted row and passes the same row to
+Paimon. Preserve that reuse when changing the interfaces or their adapters.
+
 ## CDC-Aware Sink Design
 
 If the sink accepts CDC input, define the mapping very clearly:

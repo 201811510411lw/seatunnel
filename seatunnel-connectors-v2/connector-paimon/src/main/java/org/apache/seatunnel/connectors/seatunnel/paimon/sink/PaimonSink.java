@@ -26,10 +26,13 @@ import org.apache.seatunnel.api.serialization.Serializer;
 import org.apache.seatunnel.api.sink.SaveModeHandler;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSink;
 import org.apache.seatunnel.api.sink.SupportSaveMode;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkGlobalCommitRecovery;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.schema.SchemaChangeType;
@@ -42,11 +45,13 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.handler.PaimonSaveModeHandler;
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitter;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.state.PaimonSinkState;
 
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.BranchManager;
@@ -55,8 +60,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -68,6 +76,8 @@ public class PaimonSink
                         PaimonAggregatedCommitInfo>,
                 SupportSaveMode,
                 SupportMultiTableSink,
+                SupportSinkWriteRouting<SeaTunnelRow>,
+                SupportSinkGlobalCommitRecovery,
                 SupportLoadTable<Table>,
                 SupportSchemaEvolutionSink {
 
@@ -90,6 +100,8 @@ public class PaimonSink
     private final PaimonBucketAssignerFactory paimonBucketAssignerFactory;
 
     private final String commitUser = UUID.randomUUID().toString();
+
+    private PaimonWriteRouting writeRouting;
 
     public PaimonSink(ReadonlyConfig readonlyConfig, CatalogTable catalogTable) {
         this.readonlyConfig = readonlyConfig;
@@ -130,40 +142,206 @@ public class PaimonSink
         return PLUGIN_NAME;
     }
 
+    /**
+     * Enables ownership routing only for fixed buckets after loading the physical target table.
+     * Other bucket modes retain their existing assigner and writer lifecycle.
+     */
     @Override
-    public PaimonSinkWriter createWriter(SinkWriter.Context context) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+    public Optional<SinkWriteRouting<SeaTunnelRow>> getWriteRouting(int writerCount) {
+        if (writerCount < 1) {
+            throw new IllegalArgumentException("Paimon writer parallelism must be positive");
+        }
+        if (paimonTable == null) {
+            throw new IllegalStateException("Paimon table must be loaded before building routing");
+        }
+        if (paimonTable.bucketMode() != BucketMode.HASH_FIXED) {
+            writeRouting = null;
+            return Optional.empty();
+        }
+        writeRouting =
+                new PaimonWriteRouting(
+                        paimonTable,
+                        catalogTable.getTableSchema().toPhysicalRowDataType(),
+                        writerCount);
+        return Optional.of(writeRouting);
     }
 
+    /**
+     * Requests complete global recovery when the engine has enabled fixed-bucket ownership. Other
+     * engines and bucket modes keep their existing commit protocol. This query does not rebuild the
+     * routing policy and is never used on the per-record path.
+     */
+    @Override
+    public boolean requiresGlobalCommitRecovery() {
+        return writeRouting != null;
+    }
+
+    /** Creates a writer with the ownership policy selected during engine setup, if any. */
+    @Override
+    public PaimonSinkWriter createWriter(SinkWriter.Context context) throws IOException {
+        if (writeRouting != null) {
+            writeRouting.validateWriterContext(
+                    context.getNumberOfParallelSubtasks(), context.getIndexOfSubtask());
+        }
+        PaimonSinkWriter writer =
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory);
+        writer.setWriteRouting(writeRouting);
+        return writer;
+    }
+
+    /**
+     * Creates a committer after engine routing discovery, enabling empty recovery confirmation only
+     * when the corresponding writers use fixed-bucket ownership guards.
+     */
     @Override
     public Optional<SinkAggregatedCommitter<PaimonCommitInfo, PaimonAggregatedCommitInfo>>
             createAggregatedCommitter() throws IOException {
-        return Optional.of(new PaimonAggregatedCommitter(paimonTable, paimonHadoopConfiguration));
+        return Optional.of(
+                new PaimonAggregatedCommitter(
+                        paimonTable, paimonHadoopConfiguration, writeRouting != null));
     }
 
+    /**
+     * Restores routed writers only after validating every assigned state fragment. Historical
+     * commits remain the global committer's responsibility, including single-writer recovery; modes
+     * without fixed-bucket routing retain their existing writer recovery path.
+     */
     @Override
     public SinkWriter<SeaTunnelRow, PaimonCommitInfo, PaimonSinkState> restoreWriter(
             SinkWriter.Context context, List<PaimonSinkState> states) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                states,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+        if (writeRouting != null) {
+            validateRoutedWriterState(context, states);
+            PaimonSinkWriter writer = createWriter(context);
+            writer.deferRecoveryUntilGlobalCommit(states.get(0));
+            return writer;
+        }
+        PaimonSinkWriter writer =
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        states,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory);
+        writer.setWriteRouting(writeRouting);
+        return writer;
+    }
+
+    /**
+     * Rejects incomplete or incompatible ownership state before opening a restored writer. A shrink
+     * to one writer must include every former writer at the same committed boundary.
+     */
+    private void validateRoutedWriterState(
+            SinkWriter.Context context, List<PaimonSinkState> states) {
+        if (states == null || states.isEmpty() || states.stream().anyMatch(Objects::isNull)) {
+            throw recoveryFailure(
+                    context,
+                    "Cannot restore routed Paimon sink without writer state; stateCount="
+                            + (states == null ? "null" : states.size()));
+        }
+        PaimonSinkState first = states.get(0);
+        int previousParallelism = first.getWriterParallelism();
+        int currentParallelism = context.getNumberOfParallelSubtasks();
+        boolean rescaled = previousParallelism != currentParallelism;
+        if (previousParallelism < 1
+                || first.getBucketRoutingVersion() != 2
+                || (rescaled && currentParallelism != 1)) {
+            throw recoveryFailure(
+                    context,
+                    "Paimon writer restore requires compatible routed state; "
+                            + "rescaling is supported only to one writer with routing state version 2; "
+                            + "restoredVersion="
+                            + first.getBucketRoutingVersion()
+                            + ", restoredParallelism="
+                            + previousParallelism
+                            + ", checkpoint="
+                            + first.getCheckpointId());
+        }
+        int expectedStates = rescaled ? previousParallelism : 1;
+        if (states.size() != expectedStates) {
+            throw recoveryFailure(
+                    context,
+                    "Incomplete or duplicate Paimon writer state assignment; expectedStates="
+                            + expectedStates
+                            + ", actualStates="
+                            + states.size()
+                            + ", checkpoint="
+                            + first.getCheckpointId());
+        }
+        Set<Integer> writerIndexes = new HashSet<>();
+        for (PaimonSinkState state : states) {
+            if (state.getBucketRoutingVersion() != first.getBucketRoutingVersion()
+                    || state.getWriterParallelism() != previousParallelism
+                    || state.getCheckpointId() != first.getCheckpointId()
+                    || state.getCommitUser() == null
+                    || !Objects.equals(state.getCommitUser(), first.getCommitUser())
+                    || state.getCommitTables() == null) {
+                throw recoveryFailure(
+                        context,
+                        "Inconsistent Paimon writer recovery boundary; expectedCheckpoint="
+                                + first.getCheckpointId()
+                                + ", actualCheckpoint="
+                                + state.getCheckpointId()
+                                + ", expectedVersion="
+                                + first.getBucketRoutingVersion()
+                                + ", actualVersion="
+                                + state.getBucketRoutingVersion()
+                                + ", expectedParallelism="
+                                + previousParallelism
+                                + ", actualParallelism="
+                                + state.getWriterParallelism()
+                                + ", matchingCommitIdentity="
+                                + (state.getCommitUser() != null
+                                        && Objects.equals(
+                                                state.getCommitUser(), first.getCommitUser()))
+                                + ", hasCommitMessages="
+                                + (state.getCommitTables() != null));
+            }
+            if (state.getWriterIndex() < 0
+                    || state.getWriterIndex() >= previousParallelism
+                    || !writerIndexes.add(state.getWriterIndex())
+                    || (!rescaled && state.getWriterIndex() != context.getIndexOfSubtask())) {
+                throw recoveryFailure(
+                        context,
+                        "Invalid or duplicate Paimon writer identity; restoredWriter="
+                                + state.getWriterIndex()
+                                + ", restoredParallelism="
+                                + previousParallelism
+                                + ", checkpoint="
+                                + state.getCheckpointId());
+            }
+        }
+    }
+
+    /** Adds table and current writer context without exposing commit identities or row contents. */
+    private IllegalStateException recoveryFailure(SinkWriter.Context context, String detail) {
+        return new IllegalStateException(
+                detail
+                        + "; table="
+                        + catalogTable.getTablePath()
+                        + ", writer="
+                        + context.getIndexOfSubtask()
+                        + ", parallelism="
+                        + context.getNumberOfParallelSubtasks());
+    }
+
+    /** Exposes the existing serializable writer state so engine adapters can retain it. */
+    @Override
+    public Optional<Serializer<PaimonSinkState>> getWriterStateSerializer() {
+        return Optional.of(new DefaultSerializer<>());
     }
 
     @Override

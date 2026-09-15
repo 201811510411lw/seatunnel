@@ -21,7 +21,10 @@ import org.apache.seatunnel.shade.com.typesafe.config.Config;
 
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkGlobalCommitRecovery;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.translation.flink.schema.BroadcastSchemaSinkOperator;
 import org.apache.seatunnel.translation.flink.sink.FlinkSink;
@@ -32,6 +35,7 @@ import org.apache.flink.streaming.api.datastream.DataStreamSink;
 
 import java.net.URL;
 import java.util.List;
+import java.util.Optional;
 
 import static org.apache.seatunnel.common.constants.JobMode.STREAMING;
 
@@ -49,6 +53,13 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
     @Override
     protected DataStreamSink<SeaTunnelRow> createVersionSpecificDataStreamSink(
             DataStreamTableInfo stream, SeaTunnelSink sink, int parallelism, Config sinkConfig) {
+        Optional<SinkWriteRouting<SeaTunnelRow>> routing =
+                SupportSinkWriteRouting.resolve(sink, parallelism);
+        if (SupportSinkGlobalCommitRecovery.isRequired(sink)) {
+            throw new UnsupportedOperationException(
+                    "Sinks requiring complete global commit recovery need the Flink 1.15 "
+                            + "adapter; the Flink 1.20 adapter is not supported");
+        }
         boolean isStreaming =
                 envConfig.hasPath("job.mode")
                         && STREAMING.toString().equalsIgnoreCase(envConfig.getString("job.mode"));
@@ -63,7 +74,19 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
                             .name("BroadcastSchemaHandler")
                             .setParallelism(parallelism);
         }
-        return ds.sinkTo(new FlinkSink<>(sink, stream.getCatalogTables(), parallelism))
-                .name(String.format("%s-Sink", sink.getPluginName()));
+        if (routing.isPresent()) {
+            ds =
+                    ds.partitionCustom(
+                            new SinkWriteRoutingPartitioner(),
+                            new SinkWriteRoutingPartitioner.RoutingKeySelector(
+                                    routing.get(), parallelism));
+        }
+        DataStreamSink<SeaTunnelRow> result =
+                ds.sinkTo(new FlinkSink<>(sink, stream.getCatalogTables(), parallelism))
+                        .name(String.format("%s-Sink", sink.getPluginName()));
+        if (routing.isPresent()) {
+            result.setParallelism(parallelism);
+        }
+        return result;
     }
 }

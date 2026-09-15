@@ -60,6 +60,33 @@ libfb303-xxx.jar
 - [x] [support multiple table write](../../introduction/concepts/connector-v2-features.md)
 - [ ] [timer flush](../../introduction/concepts/connector-v2-features.md)
 
+### Fixed-bucket ownership on Flink
+
+When using the Flink 1.15 adapter, `HASH_FIXED` tables automatically route records by the
+physical Paimon partition and bucket. Every bucket has one writer owner, including when a
+single-table job is wrapped by `MultiTableSink`. Dynamic and bucket-unaware tables retain
+their existing assignment logic. Put them in a separate sink from fixed-bucket tables;
+mixing these recovery contracts in one multi-table sink is rejected before writers start.
+
+- Set `multi_table_sink_replica = 1` for a sink containing fixed-bucket tables. Independent
+  source tables targeting the same physical Paimon location are rejected; merge their records
+  before the sink instead.
+- Checkpoints retain all writer identities and global commit fragments. Recovery confirms
+  completed historical commits, including an empty latest boundary, before writers continue.
+  Incomplete or inconsistent state is rejected. Restoring at the same parallelism is supported;
+  reducing parallelism to one requires complete state from every previous writer. Other
+  parallelism changes and changes to the restored table topology are rejected.
+  Use a non-draining savepoint or a checkpoint taken before termination; restoring a terminal
+  (end-of-input) commit boundary is rejected.
+- Checkpoints/savepoints created before this ownership protocol cannot be used to enable it.
+  Start a fresh snapshot when upgrading an existing fixed-bucket Flink job. Routing does not
+  repair previously persisted incorrect updates or deletes; reconcile the target with the source.
+- Online schema changes are rejected for fixed-bucket writers because their ownership policy
+  captures the physical schema at job creation. A restore event confirming the same source
+  schema is accepted. Structural changes require a fresh job with the updated schema.
+- The separate Flink 1.13 and Flink 1.20 adapters reject fixed-bucket routing jobs because they
+  do not implement this global recovery protocol. Use the Flink 1.15 adapter for this path.
+
 ## Options
 
 | name                         | type    | required | default value                | Description                                                                                                                                                      |

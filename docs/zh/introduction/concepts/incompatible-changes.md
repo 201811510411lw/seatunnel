@@ -4,6 +4,21 @@
 
 ## dev
 
+### Paimon 固定桶 Flink 归属与恢复
+
+- **影响范围**：Flink 上的 Paimon `HASH_FIXED` 表。
+- **行为变更**：Flink 1.15 Adapter 保证每个物理分区/bucket 只有一个 Writer，并在恢复
+  全部历史提交后继续写入。重复物理目标、`multi_table_sink_replica` 不等于 1、状态不完整、
+  不支持的并行度变更、在线结构变更以及同一多表 Sink 混用固定桶与非固定桶会被拒绝。
+  独立的 Flink 1.13 和 Flink 1.20 Adapter
+  尚未实现此恢复协议，因此拒绝该路径；动态桶和无桶模式沿用既有行为。
+- **迁移方式**：既有固定桶作业需使用 Flink 1.15 Adapter 重新执行快照；旧 Checkpoint/
+  Savepoint 不包含所需的归属与全局状态。对于目标中此前已出现的错误数据，需根据源端
+  核对修复。后续恢复需保持表拓扑与 Writer 并行度；只有完整取得所有旧 Writer 状态时，
+  才允许缩容至单 Writer。使用不执行 drain 的 Savepoint 或终止前的 Checkpoint，
+  终态提交边界不能恢复；动态桶和无桶表需配置在独立的 Sink 中。
+  详见 [Paimon Sink 文档](../../connectors/sink/Paimon.md)。
+
 ### MySQL CDC Schema-Change 解析
 
 - **行为变更：向上传播 DDL 解析监听器错误**

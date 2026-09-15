@@ -42,6 +42,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssigner;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.RowAssignerChannelComputer;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.schema.handler.AlterPaimonTableSchemaEventHandler;
@@ -49,6 +50,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.sink.state.PaimonSinkSta
 import org.apache.seatunnel.connectors.seatunnel.paimon.utils.RowConverter;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.disk.IOManagerImpl;
@@ -61,6 +63,7 @@ import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.sink.TableWrite;
 import org.apache.paimon.utils.BranchManager;
+import org.apache.paimon.utils.SnapshotManager;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -73,6 +76,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.disk.IOManagerImpl.splitPaths;
@@ -121,6 +125,83 @@ public class PaimonSinkWriter
     private final int taskIndex;
 
     private final Set<PaimonBucketAssigner> bucketAssigners = new HashSet<>();
+
+    private PaimonWriteRouting writeRouting;
+
+    private String recoveryCommitUser;
+
+    private long recoveryCheckpointId;
+
+    /** Installs the same physical ownership policy used by the upstream partitioner. */
+    public void setWriteRouting(PaimonWriteRouting writeRouting) {
+        if (writeRouting != null) {
+            writeRouting.validateWriterContext(parallelism, taskIndex);
+        }
+        this.writeRouting = writeRouting;
+    }
+
+    /**
+     * Closes the fresh table writer until the global committer confirms the complete restored
+     * boundary, including empty latest states and recovery after shrinking to one writer.
+     */
+    void deferRecoveryUntilGlobalCommit(PaimonSinkState state) {
+        // Global recovery confirms even an empty latest boundary: earlier nonempty checkpoints
+        // can still be pending outside writer state. Only then is it safe to reopen TableWrite.
+        recoveryCommitUser = state.getCommitUser();
+        recoveryCheckpointId = state.getCheckpointId();
+        tableWriteClose(tableWrite);
+        tableWrite = null;
+    }
+
+    /**
+     * Reopens writing only after the complete restored boundary is visible in Paimon. The bounded
+     * wait applies during recovery; normal writes return immediately without querying the catalog.
+     */
+    private void awaitRecoveredGlobalCommit() throws IOException {
+        if (recoveryCommitUser == null) {
+            return;
+        }
+        long timeoutNanos =
+                TimeUnit.MILLISECONDS.toNanos(
+                        Math.max(0L, Math.min(30_000L, paimonTable.coreOptions().commitTimeout())));
+        long started = System.nanoTime();
+        SnapshotManager snapshotManager = paimonTable.snapshotManager();
+        while (true) {
+            Optional<Snapshot> snapshot;
+            try {
+                snapshot =
+                        PaimonSecurityContext.runSecured(
+                                () -> {
+                                    snapshotManager.invalidateCache();
+                                    return snapshotManager.latestSnapshotOfUser(recoveryCommitUser);
+                                });
+            } catch (Exception failure) {
+                throw new IOException("Unable to verify recovered Paimon global commit", failure);
+            }
+            if (snapshot.isPresent() && snapshot.get().commitIdentifier() >= recoveryCheckpointId) {
+                newTableWrite();
+                recoveryCommitUser = null;
+                return;
+            }
+            long remainingNanos = timeoutNanos - (System.nanoTime() - started);
+            if (remainingNanos <= 0) {
+                throw new IOException(
+                        "Timed out waiting for Paimon global commit at checkpoint "
+                                + recoveryCheckpointId
+                                + "; last confirmed checkpoint="
+                                + snapshot.map(Snapshot::commitIdentifier).orElse(-1L)
+                                + "; refusing to write or checkpoint incomplete recovery");
+            }
+            try {
+                TimeUnit.NANOSECONDS.sleep(
+                        Math.min(TimeUnit.MILLISECONDS.toNanos(50), remainingNanos));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException(
+                        "Interrupted while waiting for Paimon global commit", interrupted);
+            }
+        }
+    }
 
     public PaimonSinkWriter(
             Context context,
@@ -213,7 +294,12 @@ public class PaimonSinkWriter
                             .collect(
                                     Collectors.toMap(
                                             PaimonSinkState::getCheckpointId,
-                                            PaimonSinkState::getCommitTables));
+                                            PaimonSinkState::getCommitTables,
+                                            (left, right) -> {
+                                                List<CommitMessage> merged = new ArrayList<>(left);
+                                                merged.addAll(right);
+                                                return merged;
+                                            }));
             // batch mode without checkpoint has no state to commit
             if (commitMessagesMap.isEmpty()) {
                 return;
@@ -227,10 +313,14 @@ public class PaimonSinkWriter
         }
     }
 
+    /** Converts each data record once and checks fixed-bucket ownership before writing it. */
     @Override
     public void write(SeaTunnelRow element) throws IOException {
+        awaitRecoveredGlobalCommit();
         InternalRow rowData =
-                RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema);
+                writeRouting == null
+                        ? RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema)
+                        : writeRouting.convertForWriter(element, taskIndex);
         try {
             PaimonSecurityContext.runSecured(
                     () -> {
@@ -262,8 +352,30 @@ public class PaimonSinkWriter
         }
     }
 
+    /**
+     * Keeps the initialized fixed-bucket routing schema stable. Replaying the same runtime schema
+     * is harmless; changing it would also require rebuilding the upstream partitioner. Unrouted
+     * bucket modes continue to use the existing branch-aware schema evolution implementation.
+     *
+     * <p>The comparison uses the input row type captured from the catalog table, matching the
+     * upstream partitioner's converter. The physical Paimon table can use different native types
+     * and is already captured independently by the routing policy.
+     */
     @Override
     public void applySchemaChange(SchemaChangeEvent event) throws IOException {
+        if (writeRouting != null) {
+            if (event instanceof RestoreTableSchemaEvent
+                    && event.getChangeAfter() != null
+                    && seaTunnelRowType.equals(
+                            event.getChangeAfter().getTableSchema().toPhysicalRowDataType())) {
+                // Do not reopen TableWrite here: pending global recovery still owns that boundary.
+                return;
+            }
+            throw new UnsupportedOperationException(
+                    "Cannot change the schema of a bucket-routed Paimon writer; "
+                            + "restart the job with the updated schema for table "
+                            + paimonTablePath);
+        }
         if (event instanceof RestoreTableSchemaEvent && event.getChangeAfter() != null) {
             this.sourceTableSchema = event.getChangeAfter().getTableSchema();
         } else {
@@ -309,8 +421,10 @@ public class PaimonSinkWriter
         return Optional.empty();
     }
 
+    /** Prepares the next boundary only after complete global recovery has reopened the writer. */
     @Override
     public Optional<PaimonCommitInfo> prepareCommit(long checkpointId) throws IOException {
+        awaitRecoveredGlobalCommit();
         try {
             List<CommitMessage> fileCommittables =
                     ((StreamTableWrite) tableWrite).prepareCommit(waitCompaction(), checkpointId);
@@ -329,10 +443,20 @@ public class PaimonSinkWriter
         }
     }
 
+    /**
+     * Captures the prepared boundary with the original writer identity, including idle writers.
+     * Recovery requires all original identities when shrinking to one writer.
+     */
     @Override
     public List<PaimonSinkState> snapshotState(long checkpointId) throws IOException {
+        awaitRecoveredGlobalCommit();
         PaimonSinkState paimonSinkState =
                 new PaimonSinkState(new ArrayList<>(committables), commitUser, checkpointId);
+        if (writeRouting != null) {
+            paimonSinkState.setBucketRoutingVersion(2);
+            paimonSinkState.setWriterParallelism(parallelism);
+            paimonSinkState.setWriterIndex(taskIndex);
+        }
         committables.clear();
         return Collections.singletonList(paimonSinkState);
     }

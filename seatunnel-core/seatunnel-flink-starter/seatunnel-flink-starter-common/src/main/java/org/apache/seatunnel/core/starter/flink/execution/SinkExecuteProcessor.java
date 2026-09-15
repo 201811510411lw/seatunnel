@@ -21,9 +21,12 @@ import org.apache.seatunnel.shade.com.typesafe.config.Config;
 
 import org.apache.seatunnel.api.common.JobContext;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.translation.flink.schema.BroadcastSchemaSinkOperator;
+import org.apache.seatunnel.translation.flink.sink.FlinkRecoverySink;
 import org.apache.seatunnel.translation.flink.sink.FlinkSink;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -33,6 +36,7 @@ import org.apache.flink.streaming.api.transformations.SinkV1Adapter;
 
 import java.net.URL;
 import java.util.List;
+import java.util.Optional;
 
 import static org.apache.seatunnel.common.constants.JobMode.STREAMING;
 
@@ -64,9 +68,25 @@ public class SinkExecuteProcessor extends AbstractSinkExecuteProcessor {
                             .name("BroadcastSchemaHandler")
                             .setParallelism(parallelism);
         }
-        return ds.sinkTo(
-                        SinkV1Adapter.wrap(
-                                new FlinkSink<>(sink, stream.getCatalogTables(), parallelism)))
-                .name(String.format("%s-Sink", sink.getPluginName()));
+        Optional<SinkWriteRouting<SeaTunnelRow>> routing =
+                SupportSinkWriteRouting.resolve(sink, parallelism);
+        if (routing.isPresent()) {
+            ds =
+                    ds.partitionCustom(
+                            new SinkWriteRoutingPartitioner(),
+                            new SinkWriteRoutingPartitioner.RoutingKeySelector(
+                                    routing.get(), parallelism));
+        }
+        FlinkSink flinkSink = new FlinkSink<>(sink, stream.getCatalogTables(), parallelism);
+        DataStreamSink<SeaTunnelRow> result =
+                ds.sinkTo(
+                                flinkSink.requiresGlobalCommitRecovery()
+                                        ? new FlinkRecoverySink<>(flinkSink)
+                                        : SinkV1Adapter.wrap(flinkSink))
+                        .name(String.format("%s-Sink", sink.getPluginName()));
+        if (routing.isPresent() || flinkSink.requiresGlobalCommitRecovery()) {
+            result.setParallelism(parallelism);
+        }
+        return result;
     }
 }

@@ -60,6 +60,29 @@ libfb303-xxx.jar
 - [x] [支持多表写入](../../introduction/concepts/connector-v2-features.md)
 - [ ] [定时刷新](../../introduction/concepts/connector-v2-features.md)
 
+### Flink 固定桶 Writer 归属
+
+使用 Flink 1.15 Adapter 时，`HASH_FIXED` 表自动按 Paimon 物理分区和 bucket 路由，
+每个 bucket 由一个 Writer 负责；单表作业经过 `MultiTableSink` 包装后同样生效。
+动态桶和无桶模式沿用既有分配逻辑，应与固定桶表配置在不同的 Sink 中；
+同一个多表 Sink 混用这些恢复协议会在 Writer 启动前被拒绝。
+
+- 包含固定桶表的 Sink 必须设置 `multi_table_sink_replica = 1`。多个独立源表指向
+  同一个 Paimon 物理位置时会被拒绝，应先合并记录再交给 Sink。
+- Checkpoint 保存全部 Writer 身份及全局提交片段。恢复时，先确认已完成边界的历史
+  提交，包括最新的空边界，再允许 Writer 继续写入；不完整或不一致的状态会被拒绝。
+  支持保持并行度恢复；缩容至一个 Writer 时必须具备原来所有 Writer 的完整状态。
+  其他并行度变更和恢复时的表拓扑变更会被拒绝。
+  请使用不执行 drain 的 Savepoint 或终止前生成的 Checkpoint；包含输入结束提交边界的
+  终态不能恢复。
+- 本协议启用前生成的 Checkpoint/Savepoint 不能直接用于启用固定桶归属保护，升级
+  既有固定桶 Flink 作业时需要重新执行快照。新路由不会修复目标中已经持久化的错误
+  UPDATE/DELETE，需要根据源端数据核对目标。
+- 固定桶 Writer 的归属策略在建图时捕获物理 schema，因此拒绝在线结构变更；确认
+  相同源 schema 的恢复事件可以通过。结构变更需要以新 schema 启动新的作业。
+- 独立的 Flink 1.13 和 Flink 1.20 Adapter 尚未实现该全局恢复协议，因此拒绝固定桶
+  路由作业。该路径请使用 Flink 1.15 Adapter。
+
 ## 连接器选项
 
 | 名称                           | 类型   | 是否必须 | 默认值                          | 描述                                                                                                   |

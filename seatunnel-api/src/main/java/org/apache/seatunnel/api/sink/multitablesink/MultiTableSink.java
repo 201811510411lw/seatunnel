@@ -29,8 +29,11 @@ import org.apache.seatunnel.api.serialization.Serializer;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
 import org.apache.seatunnel.api.sink.SinkCommitter;
+import org.apache.seatunnel.api.sink.SinkWriteRouting;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkGlobalCommitRecovery;
+import org.apache.seatunnel.api.sink.SupportSinkWriteRouting;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.factory.MultiTableFactoryContext;
@@ -45,11 +48,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -66,7 +71,9 @@ public class MultiTableSink
                         MultiTableState,
                         MultiTableCommitInfo,
                         MultiTableAggregatedCommitInfo>,
-                SupportSchemaEvolutionSink {
+                SupportSchemaEvolutionSink,
+                SupportSinkWriteRouting<SeaTunnelRow>,
+                SupportSinkGlobalCommitRecovery {
 
     @Getter private final Map<TablePath, SeaTunnelSink> sinks;
     private final int replicaNum;
@@ -75,6 +82,7 @@ public class MultiTableSink
     private final int tableRetryTimes;
     private final int tableRetryIntervalSeconds;
     private JobContext jobContext;
+    private Set<String> globalCommitRecoveryTables = Collections.emptySet();
 
     /**
      * Constructs a MultiTableSink from the given factory context.
@@ -107,6 +115,111 @@ public class MultiTableSink
     @Override
     public String getPluginName() {
         return "MultiTableSink";
+    }
+
+    /**
+     * Combines the ownership policies of active tables. All active tables must participate in
+     * routing when any active table requires it, and independent writers cannot target the same
+     * physical table.
+     */
+    @Override
+    public Optional<SinkWriteRouting<SeaTunnelRow>> getWriteRouting(int writerCount) {
+        Map<String, SinkWriteRouting<SeaTunnelRow>> routes = new HashMap<>();
+        Set<String> targets = new HashSet<>();
+        Set<String> unroutedTables = new HashSet<>();
+        for (Map.Entry<TablePath, SeaTunnelSink> entry : sinks.entrySet()) {
+            if (shouldSkipFailedTable(initialFailedTables, entry.getKey())) {
+                continue;
+            }
+            Optional<SinkWriteRouting<SeaTunnelRow>> route =
+                    SupportSinkWriteRouting.resolve(entry.getValue(), writerCount);
+            if (route.isPresent()) {
+                if (!targets.add(route.get().targetIdentifier())) {
+                    throw new IllegalArgumentException(
+                            "Multiple source tables cannot create independent routed writers for "
+                                    + "the same physical target; merge them before the sink");
+                }
+                routes.put(entry.getKey().toString(), route.get());
+            } else {
+                unroutedTables.add(entry.getKey().toString());
+            }
+        }
+        if (!routes.isEmpty() && !unroutedTables.isEmpty()) {
+            throw new UnsupportedOperationException(
+                    "Cannot mix routed and unrouted sinks in one multi-table sink; "
+                            + "use separate sinks for tables without routing: "
+                            + unroutedTables);
+        }
+        if (!routes.isEmpty() && replicaNum != 1) {
+            throw new UnsupportedOperationException(
+                    "Bucket-routed multi-table sinks require multi_table_sink_replica = 1");
+        }
+        return routes.isEmpty()
+                ? Optional.empty()
+                : Optional.of(new MultiTableWriteRouting(routes));
+    }
+
+    /**
+     * Requires the complete writer/global state recovery protocol only when all active tables
+     * require it. Failed tables registered before runtime are skipped because they will not create
+     * writers during restore.
+     */
+    @Override
+    public boolean requiresGlobalCommitRecovery() {
+        Set<String> recoveryTables = new HashSet<>();
+        Set<String> noRecoveryTables = new HashSet<>();
+        for (Map.Entry<TablePath, SeaTunnelSink> entry : sinks.entrySet()) {
+            if (shouldSkipFailedTable(initialFailedTables, entry.getKey())) {
+                continue;
+            }
+            if (SupportSinkGlobalCommitRecovery.isRequired(entry.getValue())) {
+                recoveryTables.add(entry.getKey().toString());
+            } else {
+                noRecoveryTables.add(entry.getKey().toString());
+            }
+        }
+        if (!recoveryTables.isEmpty() && !noRecoveryTables.isEmpty()) {
+            throw new UnsupportedOperationException(
+                    "Cannot mix sinks with and without global commit recovery in one "
+                            + "multi-table sink; use separate sinks for tables without recovery: "
+                            + noRecoveryTables);
+        }
+        if (!recoveryTables.isEmpty() && replicaNum != 1) {
+            throw new UnsupportedOperationException(
+                    "Global commit recovery for multi-table sinks requires "
+                            + "multi_table_sink_replica = 1");
+        }
+        globalCommitRecoveryTables = recoveryTables;
+        return !globalCommitRecoveryTables.isEmpty();
+    }
+
+    private static final class MultiTableWriteRouting implements SinkWriteRouting<SeaTunnelRow> {
+
+        private static final long serialVersionUID = 1L;
+
+        private final Map<String, SinkWriteRouting<SeaTunnelRow>> routes;
+
+        private MultiTableWriteRouting(Map<String, SinkWriteRouting<SeaTunnelRow>> routes) {
+            this.routes = routes;
+        }
+
+        @Override
+        public int route(SeaTunnelRow row) {
+            SinkWriteRouting<SeaTunnelRow> routing = routes.get(row.getTableId());
+            if (routing == null) {
+                throw new IllegalArgumentException(
+                        "Unknown table in bucket-routed multi-table sink: " + row.getTableId());
+            }
+            return routing.route(row);
+        }
+
+        @Override
+        public String targetIdentifier() {
+            return routes.values().stream()
+                    .map(SinkWriteRouting::targetIdentifier)
+                    .sorted()
+                    .collect(Collectors.joining(","));
+        }
     }
 
     /**
@@ -171,6 +284,57 @@ public class MultiTableSink
     @Override
     public SinkWriter<SeaTunnelRow, MultiTableCommitInfo, MultiTableState> restoreWriter(
             SinkWriter.Context context, List<MultiTableState> states) throws IOException {
+        boolean requiresGlobalCommitRecovery = requiresGlobalCommitRecovery();
+        boolean mergeRecoveredWriters =
+                requiresGlobalCommitRecovery && context.getNumberOfParallelSubtasks() == 1;
+        if (requiresGlobalCommitRecovery) {
+            if (replicaNum != 1 || states == null || states.isEmpty()) {
+                throw new IllegalStateException(
+                        "Missing or unsupported global commit recovery state; writer="
+                                + context.getIndexOfSubtask()
+                                + ", parallelism="
+                                + context.getNumberOfParallelSubtasks()
+                                + ", multi_table_sink_replica="
+                                + replicaNum
+                                + ", stateCount="
+                                + (states == null ? "null" : states.size()));
+            }
+            for (MultiTableState state : states) {
+                List<MultiTableFailedTable> failedTables = new ArrayList<>(initialFailedTables);
+                if (state.getFailedTables() != null) {
+                    failedTables.addAll(state.getFailedTables());
+                }
+                Set<String> expectedTables =
+                        sinks.keySet().stream()
+                                .filter(table -> !shouldSkipFailedTable(failedTables, table))
+                                .map(TablePath::toString)
+                                .collect(Collectors.toSet());
+                Set<String> restoredTables =
+                        state.getStates().keySet().stream()
+                                .map(SinkIdentifier::getTableIdentifier)
+                                .collect(Collectors.toSet());
+                if (state.getStates().size() != expectedTables.size()
+                        || !restoredTables.equals(expectedTables)) {
+                    Set<String> missingTables = new HashSet<>(expectedTables);
+                    missingTables.removeAll(restoredTables);
+                    Set<String> unexpectedTables = new HashSet<>(restoredTables);
+                    unexpectedTables.removeAll(expectedTables);
+                    throw new IllegalStateException(
+                            "Cannot restore global commit recovery multi-table state with changed "
+                                    + "table topology; "
+                                    + "writer="
+                                    + context.getIndexOfSubtask()
+                                    + ", missingTables="
+                                    + missingTables
+                                    + ", unexpectedTables="
+                                    + unexpectedTables
+                                    + ", expectedStates="
+                                    + expectedTables.size()
+                                    + ", actualStates="
+                                    + state.getStates().size());
+                }
+            }
+        }
         Map<SinkIdentifier, SinkWriter<SeaTunnelRow, ?, ?>> writers = new HashMap<>();
         Map<SinkIdentifier, SinkWriter.Context> sinkWritersContext = new HashMap<>();
         Map<SinkIdentifier, SinkContextProxy> proxyContexts = new HashMap<>();
@@ -192,15 +356,37 @@ public class MultiTableSink
                 int index = context.getIndexOfSubtask() * replicaNum + i;
                 SinkIdentifier sinkIdentifier = SinkIdentifier.of(tablePath.toString(), index);
                 SinkContextProxy proxy = new SinkContextProxy(index, replicaNum, context);
+                boolean requiresRecovery =
+                        globalCommitRecoveryTables.contains(tablePath.toString());
                 List<?> state =
                         states.stream()
-                                .map(
+                                .flatMap(
                                         multiTableState ->
-                                                multiTableState.getStates().get(sinkIdentifier))
+                                                multiTableState.getStates().entrySet().stream())
+                                .filter(
+                                        entry ->
+                                                mergeRecoveredWriters && requiresRecovery
+                                                        ? entry.getKey()
+                                                                .getTableIdentifier()
+                                                                .equals(tablePath.toString())
+                                                        : entry.getKey().equals(sinkIdentifier))
+                                .map(Map.Entry::getValue)
                                 .filter(Objects::nonNull)
                                 .flatMap(Collection::stream)
                                 .collect(Collectors.toList());
                 if (state.isEmpty()) {
+                    if (requiresRecovery) {
+                        throw new IllegalStateException(
+                                "Cannot restore global commit recovery multi-table sink with "
+                                        + "missing writer state; legacy state and topology changes "
+                                        + "require a fresh snapshot; "
+                                        + "table="
+                                        + tablePath
+                                        + ", writer="
+                                        + context.getIndexOfSubtask()
+                                        + ", parallelism="
+                                        + context.getNumberOfParallelSubtasks());
+                    }
                     writers.put(sinkIdentifier, sink.createWriter(proxy));
                 } else {
                     writers.put(sinkIdentifier, sink.restoreWriter(proxy, state));

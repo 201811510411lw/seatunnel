@@ -5,6 +5,24 @@ You need to check this document before you upgrade to related version.
 
 ## dev
 
+### Paimon fixed-bucket Flink ownership and recovery
+
+- **Affected component**: Paimon `HASH_FIXED` tables on Flink.
+- **Behavior change**: The Flink 1.15 adapter enforces one writer per physical partition/bucket
+  and complete global recovery before writing resumes. It rejects duplicate physical targets,
+  `multi_table_sink_replica` values other than one, incomplete state, unsupported rescaling,
+  online structural schema changes, and mixing fixed-bucket and non-fixed-bucket tables in
+  one multi-table sink. The separate Flink 1.13 and Flink 1.20 adapters reject
+  this path because they do not implement its recovery protocol. Dynamic and bucket-unaware
+  tables retain their existing behavior.
+- **Migration**: Use the Flink 1.15 adapter and start a fresh snapshot for existing fixed-bucket
+  jobs; earlier checkpoints/savepoints do not contain the required ownership and global state.
+  Reconcile any previously incorrect target data against the source. Subsequent recovery must
+  preserve the table topology and writer parallelism, except a reduction to one writer with
+  complete state from all previous writers. Use non-draining savepoints or checkpoints from
+  before termination; terminal commit boundaries cannot be restored. Put dynamic and
+  bucket-unaware tables in separate sinks. See the [Paimon sink documentation](../../connectors/sink/Paimon.md).
+
 ### MySQL CDC Schema-Change Parsing
 
 - **Behavior change: DDL parser listener errors are propagated**

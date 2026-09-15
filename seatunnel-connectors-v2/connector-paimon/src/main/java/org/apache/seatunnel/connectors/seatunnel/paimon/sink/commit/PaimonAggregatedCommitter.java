@@ -32,11 +32,11 @@ import org.apache.paimon.table.sink.TableCommitImpl;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 /** Paimon connector aggregated committer class */
@@ -49,36 +49,64 @@ public class PaimonAggregatedCommitter
 
     private final FileStoreTable table;
 
+    private final boolean confirmEmptyRecovery;
+
     public PaimonAggregatedCommitter(
             Table table, PaimonHadoopConfiguration paimonHadoopConfiguration) {
+        this(table, paimonHadoopConfiguration, false);
+    }
+
+    /**
+     * Enables empty-boundary confirmation only for an engine that activated fixed-bucket routing.
+     * Ordinary committers retain their configured empty-commit behavior, including during recovery.
+     */
+    public PaimonAggregatedCommitter(
+            Table table,
+            PaimonHadoopConfiguration paimonHadoopConfiguration,
+            boolean confirmEmptyRecovery) {
         this.table = (FileStoreTable) table;
+        this.confirmEmptyRecovery = confirmEmptyRecovery;
         PaimonSecurityContext.shouldEnableKerberos(paimonHadoopConfiguration);
     }
 
     @Override
     public List<PaimonAggregatedCommitInfo> commit(
             List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, false);
+    }
+
+    /** Publishes empty restored boundaries when routed writers must verify their recovery. */
+    @Override
+    public List<PaimonAggregatedCommitInfo> restoreCommit(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) throws IOException {
+        return commit(aggregatedCommitInfo, true);
+    }
+
+    private List<PaimonAggregatedCommitInfo> commit(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo, boolean restoring) {
         aggregatedCommitInfo.stream()
                 .collect(Collectors.groupingBy(PaimonAggregatedCommitInfo::getCommitUser))
-                .forEach(this::commit);
+                .forEach((commitUser, commits) -> commit(commitUser, commits, restoring));
         return Collections.emptyList();
     }
 
-    private void commit(String commitUser, List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) {
+    /** Commits a complete user/checkpoint group, publishing empty boundaries only on recovery. */
+    private void commit(
+            String commitUser,
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo,
+            boolean restoring) {
         try (TableCommitImpl tableCommit = table.newCommit(commitUser)) {
+            if (restoring && confirmEmptyRecovery) {
+                // Restored writers also wait for a completed boundary containing no data files.
+                // This override belongs to this invocation's TableCommitImpl, which is closed
+                // below. Neither table options nor subsequent normal commits are changed.
+                tableCommit.ignoreEmptyCommit(false);
+            }
             PaimonSecurityContext.runSecured(
                     () -> {
                         log.debug("Trying to commit states streaming mode");
                         Map<Long, List<CommitMessage>> committablesMap =
-                                aggregatedCommitInfo.stream()
-                                        .flatMap(
-                                                paimonAggregatedCommitInfo ->
-                                                        paimonAggregatedCommitInfo
-                                                                .getCommittablesMap().entrySet()
-                                                                .stream())
-                                        .collect(
-                                                Collectors.toMap(
-                                                        Map.Entry::getKey, Map.Entry::getValue));
+                                mergeCommittables(aggregatedCommitInfo);
                         if (!committablesMap.isEmpty()) {
                             tableCommit.filterAndCommit(committablesMap);
                         }
@@ -90,6 +118,9 @@ public class PaimonAggregatedCommitter
         }
     }
 
+    /**
+     * Combines all writer fragments for each checkpoint before invoking Paimon's idempotent commit.
+     */
     @Override
     public PaimonAggregatedCommitInfo combine(List<PaimonCommitInfo> commitInfos) {
         String commitUser = commitInfos.get(0).getCommitUser();
@@ -98,8 +129,7 @@ public class PaimonAggregatedCommitter
                 commitInfo ->
                         commitTables
                                 .computeIfAbsent(
-                                        commitInfo.getCheckpointId(),
-                                        id -> new CopyOnWriteArrayList<>())
+                                        commitInfo.getCheckpointId(), id -> new ArrayList<>())
                                 .addAll(commitInfo.getCommittables()));
         return new PaimonAggregatedCommitInfo(commitTables, commitUser);
     }
@@ -117,15 +147,7 @@ public class PaimonAggregatedCommitter
                     () -> {
                         log.debug("Trying to commit states streaming mode");
                         Map<Long, List<CommitMessage>> committablesMap =
-                                aggregatedCommitInfo.stream()
-                                        .flatMap(
-                                                paimonAggregatedCommitInfo ->
-                                                        paimonAggregatedCommitInfo
-                                                                .getCommittablesMap().entrySet()
-                                                                .stream())
-                                        .collect(
-                                                Collectors.toMap(
-                                                        Map.Entry::getKey, Map.Entry::getValue));
+                                mergeCommittables(aggregatedCommitInfo);
                         if (!committablesMap.isEmpty()) {
                             committablesMap.values().forEach(tableCommit::abort);
                         }
@@ -135,6 +157,23 @@ public class PaimonAggregatedCommitter
             throw new PaimonConnectorException(
                     PaimonConnectorErrorCode.TABLE_WRITE_COMMIT_FAILED, e);
         }
+    }
+
+    /** Merges every writer fragment sharing a checkpoint without dropping duplicate map keys. */
+    private Map<Long, List<CommitMessage>> mergeCommittables(
+            List<PaimonAggregatedCommitInfo> aggregatedCommitInfo) {
+        Map<Long, List<CommitMessage>> committablesMap = new HashMap<>();
+        aggregatedCommitInfo.forEach(
+                info ->
+                        info.getCommittablesMap()
+                                .forEach(
+                                        (checkpointId, committables) ->
+                                                committablesMap
+                                                        .computeIfAbsent(
+                                                                checkpointId,
+                                                                id -> new ArrayList<>())
+                                                        .addAll(committables)));
+        return committablesMap;
     }
 
     @Override

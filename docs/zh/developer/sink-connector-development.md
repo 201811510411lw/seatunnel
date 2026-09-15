@@ -139,6 +139,29 @@ connector-<name>/
 
 对表类 sink 和强一致性场景，这种模型尤其重要。
 
+## Writer 路由与全局提交恢复
+
+`SupportSinkWriteRouting<T>` 允许引擎在加载目标表后获取 `SinkWriteRouting<T>`。
+`getWriteRouting(writerCount)` 在初始化时绑定 Writer 数量，逐行处理只调用
+`route(record)`。同一物理分片的数据必须稳定地选择 `[0, writerCount)` 内的同一个
+Writer，不受 RowKind 影响。`targetIdentifier()` 标识物理目标，供多表包装器拒绝
+相互冲突的独立 Writer。以不同并行度启动作业时需要重新构造路由策略；仅重建策略
+并不能保证扩缩容恢复安全。
+
+策略可序列化，由单个任务线程使用。可复用的路由状态应在逐行处理路径之外准备，
+不能保留或修改输入记录。包装器必须转发子 Sink 的策略，并在 Writer 启动前验证
+组合是否合法。Schema 广播等引擎控制事件必须保留原定目的地，不能进入数据路由。
+
+`SupportSinkGlobalCommitRecovery` 是独立能力。完成路由初始化后，引擎通过
+`requiresGlobalCommitRecovery()` 选择完整恢复协议：收齐所有 Writer 的贡献，
+确认历史全局提交完成，再恢复 Writer 写入。该能力要求 Writer 状态、提交信息和
+全局提交信息的序列化器，以及全局提交器。多表包装器必须检查各个有效子 Sink 的
+恢复契约，拒绝不兼容的组合。仅支持路由不会自动启用此协议；未实现相应恢复机制的
+引擎必须拒绝作业，不能静默退回不安全的恢复路径。
+
+Paimon 固定桶路由同时启用上述两种能力。Writer 对每行只转换一次，用转换结果检查
+bucket 归属，并将同一结果交给 Paimon 写入。调整接口及适配层时应保留这一复用路径。
+
 ## CDC-Aware Sink 设计
 
 如果 sink 接受 CDC 输入，必须把映射规则写清楚：
