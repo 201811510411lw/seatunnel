@@ -42,6 +42,7 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssigner;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.RowAssignerChannelComputer;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.schema.handler.AlterPaimonTableSchemaEventHandler;
@@ -84,6 +85,7 @@ public class PaimonSinkWriter
                 SupportSchemaEvolutionSinkWriter {
 
     private final String commitUser;
+    private PaimonWriteRouting writeRouting;
 
     private FileStoreTable paimonTable;
 
@@ -230,7 +232,9 @@ public class PaimonSinkWriter
     @Override
     public void write(SeaTunnelRow element) throws IOException {
         InternalRow rowData =
-                RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema);
+                writeRouting == null
+                        ? RowConverter.reconvert(element, seaTunnelRowType, sinkPaimonTableSchema)
+                        : writeRouting.convertForWriter(element, taskIndex);
         try {
             PaimonSecurityContext.runSecured(
                     () -> {
@@ -262,8 +266,29 @@ public class PaimonSinkWriter
         }
     }
 
+    /** Installs the same physical ownership policy used by the upstream partitioner. */
+    void setWriteRouting(PaimonWriteRouting writeRouting) {
+        if (writeRouting != null) {
+            writeRouting.validateWriterContext(parallelism, taskIndex);
+        }
+        this.writeRouting = writeRouting;
+    }
+
     @Override
     public void applySchemaChange(SchemaChangeEvent event) throws IOException {
+        if (writeRouting != null) {
+            if (event instanceof RestoreTableSchemaEvent
+                    && event.getChangeAfter() != null
+                    && seaTunnelRowType.equals(
+                            event.getChangeAfter().getTableSchema().toPhysicalRowDataType())) {
+                // The same schema needs no writer reopen, which could discard buffered rows.
+                return;
+            }
+            throw new UnsupportedOperationException(
+                    "Cannot change the schema of a bucket-routed Paimon writer; "
+                            + "restart with the updated schema for table "
+                            + paimonTablePath);
+        }
         if (event instanceof RestoreTableSchemaEvent && event.getChangeAfter() != null) {
             this.sourceTableSchema = event.getChangeAfter().getTableSchema();
         } else {

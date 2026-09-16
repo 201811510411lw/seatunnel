@@ -676,6 +676,16 @@ Paimon Sink 深度集成了 SeaTunnel Zeta、Flink 以及 Spark 的两阶段提�
 
 两种表模式均受支持。若目标表配置了主键（`paimon.table.primary-keys`），Sink 将按主键执行 Upsert/Delete 逻辑；若未声明主键，则以 Append-Only 追加模式写入。
 
+### Flink 固定桶路由
+
+对于 `HASH_FIXED` 表，Flink 将同一物理分区和 bucket 的记录发送给同一个 Sink subtask，包含经过 `MultiTableSink` 包装的任务。并行写入时会增加一次网络 shuffle。其他桶模式保持原有处理路径。
+
+启用路由的多表 Sink 要求 `multi_table_sink_replica = 1`。固定桶与其他桶模式需要配置为独立 Sink；多个源表的独立 Writer 不得指向同一个物理 Paimon 表。这些不安全配置会在任务初始化时明确失败。
+
+路由器使用启动时的源表和目标表 schema。Schema 控制行按原始 `schema_subtask_id` 分发，绕过数据转换。允许恢复相同的源 schema；在线结构变更会被拒绝，需要停止任务并使用更新后的 schema 重新构建任务。
+
+本次修改不改变 checkpoint 序列化、全局提交恢复或扩缩容行为，不保证未完成提交的恢复，也不修复历史已损坏的数据。
+
 ## 变更日志
 
 <ChangeLog />

@@ -26,10 +26,12 @@ import org.apache.seatunnel.api.serialization.Serializer;
 import org.apache.seatunnel.api.sink.SaveModeHandler;
 import org.apache.seatunnel.api.sink.SeaTunnelSink;
 import org.apache.seatunnel.api.sink.SinkAggregatedCommitter;
+import org.apache.seatunnel.api.sink.SinkDataPartitioner;
 import org.apache.seatunnel.api.sink.SinkWriter;
 import org.apache.seatunnel.api.sink.SupportMultiTableSink;
 import org.apache.seatunnel.api.sink.SupportSaveMode;
 import org.apache.seatunnel.api.sink.SupportSchemaEvolutionSink;
+import org.apache.seatunnel.api.sink.SupportSinkDataPartition;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.schema.SchemaChangeType;
@@ -42,11 +44,13 @@ import org.apache.seatunnel.connectors.seatunnel.paimon.exception.PaimonConnecto
 import org.apache.seatunnel.connectors.seatunnel.paimon.handler.PaimonSaveModeHandler;
 import org.apache.seatunnel.connectors.seatunnel.paimon.security.PaimonSecurityContext;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonBucketAssignerFactory;
+import org.apache.seatunnel.connectors.seatunnel.paimon.sink.bucket.PaimonWriteRouting;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonAggregatedCommitter;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.commit.PaimonCommitInfo;
 import org.apache.seatunnel.connectors.seatunnel.paimon.sink.state.PaimonSinkState;
 
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.BranchManager;
@@ -68,6 +72,7 @@ public class PaimonSink
                         PaimonAggregatedCommitInfo>,
                 SupportSaveMode,
                 SupportMultiTableSink,
+                SupportSinkDataPartition<SeaTunnelRow>,
                 SupportLoadTable<Table>,
                 SupportSchemaEvolutionSink {
 
@@ -88,6 +93,7 @@ public class PaimonSink
     private final PaimonHadoopConfiguration paimonHadoopConfiguration;
 
     private final PaimonBucketAssignerFactory paimonBucketAssignerFactory;
+    private PaimonWriteRouting writeRouting;
 
     private final String commitUser = UUID.randomUUID().toString();
 
@@ -132,16 +138,17 @@ public class PaimonSink
 
     @Override
     public PaimonSinkWriter createWriter(SinkWriter.Context context) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+        return configureRouting(
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory));
     }
 
     @Override
@@ -153,17 +160,18 @@ public class PaimonSink
     @Override
     public SinkWriter<SeaTunnelRow, PaimonCommitInfo, PaimonSinkState> restoreWriter(
             SinkWriter.Context context, List<PaimonSinkState> states) throws IOException {
-        return new PaimonSinkWriter(
-                context,
-                readonlyConfig,
-                catalogTable,
-                paimonTable,
-                commitUser,
-                states,
-                jobContext,
-                paimonSinkConfig,
-                paimonHadoopConfiguration,
-                paimonBucketAssignerFactory);
+        return configureRouting(
+                new PaimonSinkWriter(
+                        context,
+                        readonlyConfig,
+                        catalogTable,
+                        paimonTable,
+                        commitUser,
+                        states,
+                        jobContext,
+                        paimonSinkConfig,
+                        paimonHadoopConfiguration,
+                        paimonBucketAssignerFactory));
     }
 
     @Override
@@ -208,6 +216,32 @@ public class PaimonSink
     @Override
     public Table getLoadTable() {
         return paimonTable;
+    }
+
+    /** Enables the original ownership policy only for loaded fixed-bucket tables. */
+    @Override
+    public Optional<SinkDataPartitioner<SeaTunnelRow>> getSinkDataPartitioner(int writerCount) {
+        if (writerCount < 1) {
+            throw new IllegalArgumentException("Paimon writer parallelism must be positive");
+        }
+        if (paimonTable == null) {
+            throw new IllegalStateException("Paimon table must be loaded before building routing");
+        }
+        if (paimonTable.bucketMode() != BucketMode.HASH_FIXED) {
+            writeRouting = null;
+            return Optional.empty();
+        }
+        writeRouting =
+                new PaimonWriteRouting(
+                        paimonTable,
+                        catalogTable.getTableSchema().toPhysicalRowDataType(),
+                        writerCount);
+        return Optional.of(writeRouting);
+    }
+
+    private PaimonSinkWriter configureRouting(PaimonSinkWriter writer) {
+        writer.setWriteRouting(writeRouting);
+        return writer;
     }
 
     @Override
