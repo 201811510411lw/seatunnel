@@ -1,4 +1,4 @@
-name: Engine targeted base-head repeated comparison
+name: Checkpoint fault-injection phase comparison
 on:
   push:
     branches: ['diagnostic/ci-ab-20260920']
@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   compare:
-    name: ${{ matrix.revision.name }} / ${{ matrix.test.name }} / Java 11 / 5 repeats
+    name: ${{ matrix.revision.name }} / checkpoint-${{ matrix.phase }} / Java 11 / 3 repeats
     runs-on: ubuntu-latest
     timeout-minutes: 150
     strategy:
@@ -17,16 +17,13 @@ jobs:
             sha: 1650a04cdb0d9465ef9bab6ed4a5a6d9de30a9c8
           - name: head
             sha: 5de24b8cb63d96da4bbc53d5eb974c776f434a08
-        test:
-          - name: checkpoint
-            selector: CheckpointCoordinatorFailoverIT#testStreamJobFailsAfterCheckpointTriggerDispatchFailure
-          - name: backpressure
-            selector: BackpressureSlowSinkIT#testCheckpointsKeepCompletingUnderSustainedBackpressure
+        phase: ['trigger', 'notify']
     env:
       RUN_ALL_CONTAINER: 'true'
       RUN_ZETA_CONTAINER: 'true'
       MAVEN_OPTS: -Xmx4096m
       TESTCONTAINERS_RYUK_DISABLED: 'true'
+      JAVA_TOOL_OPTIONS: -Dseatunnel.diagnostic.fault-phase=${{ matrix.phase }}
     steps:
       - name: Check out diagnostic harness
         uses: actions/checkout@v4
@@ -41,19 +38,27 @@ jobs:
       - name: Free disk space
         working-directory: tested-source
         run: tools/github/free_disk_space.sh
+      - name: Apply diagnostic-only phase gates
+        working-directory: tested-source
+        run: |
+          python3 ../.github/scripts/engine-ci-phase-gate.py
+          ./mvnw -B -pl :seatunnel-engine-server,:connector-seatunnel-e2e-base spotless:apply
+          mkdir -p ../evidence
+          git diff --check
+          git diff > ../evidence/diagnostic-source.patch
       - name: Repeat only the selected original method
         working-directory: tested-source
         env:
-          TEST_SELECTOR: ${{ matrix.test.selector }}
+          TEST_SELECTOR: CheckpointCoordinatorFailoverIT#testStreamJobFailsAfterCheckpointTriggerDispatchFailure
           EXPECTED_SHA: ${{ matrix.revision.sha }}
-          REPEATS: '5'
+          REPEATS: '3'
         run: |
           bash ../.github/scripts/engine-ab-repeat.sh
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evidence-${{ matrix.revision.name }}-${{ matrix.test.name }}-java11-repeated
+          name: evidence-${{ matrix.revision.name }}-checkpoint-${{ matrix.phase }}-java11-gated
           path: |
             evidence/**
           if-no-files-found: error
