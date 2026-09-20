@@ -1,4 +1,4 @@
-name: CI targeted base-head comparison
+name: Engine targeted base-head repeated comparison
 on:
   push:
     branches: ['diagnostic/ci-ab-20260920']
@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   compare:
-    name: ${{ matrix.revision.name }} / ${{ matrix.test.name }} / Java ${{ matrix.test.java }}
+    name: ${{ matrix.revision.name }} / ${{ matrix.test.name }} / Java 11 / 5 repeats
     runs-on: ubuntu-latest
     timeout-minutes: 150
     strategy:
@@ -18,51 +18,43 @@ jobs:
           - name: head
             sha: 5de24b8cb63d96da4bbc53d5eb974c776f434a08
         test:
-          - name: opengauss
-            java: '8'
-            module: connector-cdc-opengauss-e2e
-            selector: OpengaussCDCIT#testAddFieldWithRestore
-          - name: opengauss
-            java: '11'
-            module: connector-cdc-opengauss-e2e
-            selector: OpengaussCDCIT#testAddFieldWithRestore
           - name: checkpoint
-            java: '11'
-            module: connector-seatunnel-e2e-base
             selector: CheckpointCoordinatorFailoverIT#testStreamJobFailsAfterCheckpointTriggerDispatchFailure
+          - name: backpressure
+            selector: BackpressureSlowSinkIT#testCheckpointsKeepCompletingUnderSustainedBackpressure
     env:
       RUN_ALL_CONTAINER: 'true'
       RUN_ZETA_CONTAINER: 'true'
       MAVEN_OPTS: -Xmx4096m
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
     steps:
+      - name: Check out diagnostic harness
+        uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.revision.sha }}
+          path: tested-source
       - uses: actions/setup-java@v4
         with:
-          java-version: ${{ matrix.test.java }}
+          java-version: '11'
           distribution: temurin
-          cache: maven
       - name: Free disk space
+        working-directory: tested-source
         run: tools/github/free_disk_space.sh
-      - name: Record environment
-        run: |
-          git rev-parse HEAD
-          java -version
-          docker version
-      - name: Run original targeted test
+      - name: Repeat only the selected original method
+        working-directory: tested-source
         env:
-          TEST_MODULE: ${{ matrix.test.module }}
           TEST_SELECTOR: ${{ matrix.test.selector }}
+          EXPECTED_SHA: ${{ matrix.revision.sha }}
+          REPEATS: '5'
         run: |
-          set -o pipefail
-          ./mvnw -T 1 -B verify -DskipUT=true -DskipIT=false -Dlicense.skipAddThirdParty=true -Dskip.ui=true --no-snapshot-updates -pl ":$TEST_MODULE" -am -Pci "-Dit.test=$TEST_SELECTOR" -Dfailsafe.failIfNoSpecifiedTests=false -DfailIfNoTests=false 2>&1 | tee targeted-test.log
+          bash ../.github/scripts/engine-ab-repeat.sh
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evidence-${{ matrix.revision.name }}-${{ matrix.test.name }}-java${{ matrix.test.java }}
+          name: evidence-${{ matrix.revision.name }}-${{ matrix.test.name }}-java11-repeated
           path: |
-            targeted-test.log
-            **/target/failsafe-reports/**
+            evidence/**
+          if-no-files-found: error
           retention-days: 14
